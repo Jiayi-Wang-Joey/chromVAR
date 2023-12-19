@@ -7,3 +7,4 @@ src/*.o
 src/*.so
 inst/doc
 .DS_store
+arch/

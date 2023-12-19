@@ -1,4 +1,4 @@
-
+setDTthreads(8)
 .importFragments <- function(fragData, chunkSize=10)
   {
     if(is.list(fragData))
@@ -8,13 +8,16 @@
         print("Importing .bam files")
         param <- Rsamtools::ScanBamParam(what=c('pos', 'qwidth', 'isize'))
         fragData <- lapply(fragData, function(bamPath){
-          readPairs <- GenomicAlignments::readGAlignmentPairs(bamPath, param=param)
+          readPairs <- GenomicAlignments::readGAlignmentPairs(bamPath, 
+                                                              param=param)
           # get fragment coordinates from read pairs
           frags <- GRanges(seqnames(GenomicAlignments::first(readPairs)), 
-            IRanges(start=pmin(GenomicAlignments::start(GenomicAlignments::first(readPairs)), 
-                                              GenomicAlignments::start(GenomicAlignments::second(readPairs))), 
-                                   end=pmax(GenomicAlignments::end(GenomicAlignments::first(readPairs)), 
-                                            GenomicAlignments::end(second(readPairs)))))
+            IRanges(start=pmin(
+              GenomicAlignments::start(GenomicAlignments::first(readPairs)), 
+              GenomicAlignments::start(GenomicAlignments::second(readPairs))), 
+                    end=pmax(
+                      GenomicAlignments::end(GenomicAlignments::first(readPairs)), 
+                      GenomicAlignments::end(GenomicAlignments::second(readPairs)))))
           frags <- granges(frags, use.mcols=TRUE)
           
           # ATAC shift
@@ -30,7 +33,8 @@
       }
       else if(grepl(".bed", fragData[[1]], fixed=TRUE))
       {
-        fragData <- lapply(fragData, fread, select=1:3, col.names=c("seqnames", "start", "end"))
+        fragData <- lapply(fragData, data.table::fread, select=1:3, 
+                           col.names=c("seqnames", "start", "end"))
         fragData <- lapply(fragData, function(dt){dt$count <- 1
         dt <- dt[,c("seqnames", "start", "end", "count"), with=FALSE]
         dt})
@@ -74,13 +78,9 @@
 .sanityCheck <- function(atacFrag, 
   ranges, 
   type = c("peaks", "motifs")) {
-  nPeaks <- nrow(atacFrag[[1]])
-  lapply(atacFrag, \(frag) {
+  lapply(atacFrag, function(frag) {
       if (!is.data.table(frag)) {
         stop("Each element in atacFrag should be a data.table")
-      }
-      if(nrow(frag) != nPeaks) {
-        stop("The number of peaks does not match between samples")
       }
   })
   
@@ -108,7 +108,7 @@
 #' @return a GRange object with resized ranges
 
 .resizeRanges <- function(peakRanges, 
-  width = 200, 
+  width = 300, 
   fix = c("center", "start", "end", "summit"),
   ...) {
   
@@ -139,14 +139,14 @@
         stop("peakRanges must be a GRanges object")
     }
         
-    peakSeqs <- getSeq(x = genome, peakRanges)
+    peakSeqs <- Biostrings::getSeq(x = genome, peakRanges)
     mcols(peakRanges)$gc <- letterFrequency(peakSeqs, "GC",as.prob=TRUE)[,1]
     peakRanges
 } 
 
 
 .filterFrags <- function(atacFrag, min = 30, max = 2000) {
-    res <- lapply(atacFrag, \(frag) {
+    res <- lapply(atacFrag, function(frag) {
         frag[,width:=end-start+1]
         frag[width>=min & width<=max,]
         frag
@@ -159,7 +159,7 @@
     fragSeq <- unique(frags$seqnames)
     rangeSeq <- GenomicRanges::seqnames(ranges) 
     common <- intersect(fragSeq,rangeSeq)
-    atacFrag <- lapply(atacFrag, \(frag) {
+    atacFrag <- lapply(atacFrag, function(frag) {
      frag <- frag[seqnames %in% common,]
      frag$seqnames <- factor(frag$seqnames)
      frag})
@@ -195,8 +195,15 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   {
     gr <- GPos(seqnames=dt[[seqCol]], pos=dt[[startCol]])
   }
-  
   return(gr)
+}
+
+.standardChromosomes <- function(gr, species) {
+  gr <- keepStandardChromosomes(gr,
+                                species=species,
+                                pruning.mode="coarse")
+  seqlevelsStyle(gr) <- "UCSC"
+  gr
 }
 
 #' @Author: Emanuel Sonder
@@ -481,6 +488,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   cuts,
   genome,
   overlap = c("any", "start", "end", "within", "equal"),
+  smooth, 
+  aRange,
   ...
   #overlaps = c("any",...)
   ) {
@@ -494,17 +503,22 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     peaks$peakID <- seq_len(nrow(peaks))
     
     if (by == "weight") {
-      frags <- .weightFragments(frags, genome = genome)
+      frags <- .weightFragments(frags, 
+        genome = genome, 
+        smooth = smooth,
+        aRange = aRange)
     }
     
     frags <- .getType(frags, cuts = cuts)
     
-    fragCounts <- lapply(frags, \(frag) {
+    fragCounts <- lapply(frags, function(frag) {
       types <- names(frag)[grepl("^type_", names(frag))]
       if (by == "weight") {
         frag[,count:=weight]
         frag[,(types) := lapply(.SD, function(x) x*weight), 
           .SDcols = types]
+      } else {
+        frag[,count:=1]
       }
       #fragGR <- makeGRangesFromDataFrame(as.data.frame(frag))
       fragGR <- dtToGr(frag)
@@ -524,8 +538,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     
     cols <- names(fragCounts[[1]])[grepl("^type_|counts", 
       names(fragCounts[[1]]))]
-    allCounts <- lapply(cols, \(x) {
-      lst <- lapply(fragCounts, \(.) data.frame(.)[,x])
+    allCounts <- lapply(cols, function(x) {
+      lst <- lapply(fragCounts, function(.) data.frame(.)[,x])
       mat <- do.call(cbind, lst)
       colnames(mat) <- names(fragCounts)
       mat
@@ -542,7 +556,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 .getType <- function(atacFrag, cuts=c(0,120,300,500)) {
     # check the min of cuts
     if (cuts[1] != 0) cuts <- c(0,cuts)
-    res <- lapply(names(atacFrag), \(sample) {
+    res <- lapply(names(atacFrag), function(sample) {
         dt <- atacFrag[[sample]]
         dt[,width:=end-start+1]
         # check if max(cuts) covers max(width)
@@ -567,14 +581,13 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 
 
 .getBins <- function(atacFrag, 
-  nWidthBins = 10, 
+  nWidthBins = 30, 
   nGCBins = 10, 
   genome) {
     
     fragDts <- lapply(names(atacFrag), function(x){
       dt <- atacFrag[[x]]
       dt[,width:=end-start+1]
-      #gr <- makeGRangesFromDataFrame(as.data.frame(dt))
       gr <- dtToGr(dt)
       gr <- .getGCContent(gr, genome = genome)
       dt <- as.data.table(gr)
@@ -583,9 +596,11 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     })
     fragDt <- rbindlist(fragDts)
     
-    widthIntervals <- seq(min(fragDt$width), max(fragDt$width), 
-      length.out=nWidthBins)
-    GCIntervals <-  seq(0, 1, length.out=nGCBins)
+    widthIntervals <- unique(quantile(fragDt$width, 
+                                      probs = seq(0,1,by=1/nWidthBins)))
+    GCIntervals <-  unique(quantile(fragDt$gc, 
+                                    probs = seq(0,1,by=1/nGCBins)))
+    
     
     fragDt[,widthBin:=cut(width, 
         breaks=widthIntervals, 
@@ -605,8 +620,10 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 .weightFragments <- function (atacFrag, 
   #cuts = c(0,120,300,500),
   genome,
+  smooth = c("none", "smooth.2d"),
+  aRange,
   ...) {
-  
+    smooth <- match.arg(smooth, choices = c("none", "smooth.2d"))
     fragDt <- .getBins(atacFrag, genome = genome)
     fragDt[, bin:=paste0(widthBin, GCBin)]
     fragDt[, bin:=as.numeric(as.factor(bin))]
@@ -614,8 +631,35 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     tmp <- fragDt[,.(mean_count_bin=mean(count_bin, na.rm=TRUE)), by=c("bin")]
     fragDt <- merge(fragDt, tmp, by = "bin")
     fragDt[,weight:=mean_count_bin/count_bin]
-    res <- split(fragDt, fragDt$sample)
+    if (smooth=="none") {
+      return(split(fragDt, fragDt$sample))
+    } else if (smooth=="smooth.2d") {
+      dts <- lapply(split(fragDt, fragDt$sample), function(dt) {
+        dt[,logWeight:=log2(weight)]
+        sm <- smooth.2d(dt$logWeight, x=cbind(dt$widthBin, dt$GCBin), 
+          surface=FALSE, 
+          nrow=length(unique(dt$widthBin)), 
+          ncol=length(unique(dt$GCBin)),
+          aRange=aRange)
+        dimnames(sm) <- list(levels(dt$widthBin), levels(dt$GCBin))
+        sm
+      })
+      tbl <- melt(dts)
+      names(tbl) <- c("widthBin", "GCBin", "smooth", "sample")
+      fragDt <- merge(fragDt, 
+        tbl, 
+        by = c("GCBin", "widthBin", "sample"),
+        allow.cartesian=TRUE)
+      fragDt[,weight:=2^smooth]
+      return(split(fragDt, fragDt$sample))
+      
+    }
 }
+
+    
+
+
+
 
 #' getCounts
 #' 
@@ -634,27 +678,41 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 #'  object
 
 getCounts <- function (files,
+    atacFrag,
     ranges, # motif matches or peaks, set a parameter to define
     genome,
+    species,
     rowType = c("peaks", "motifs"),
     mode = c("total", "weight"),
     paired = TRUE,
     resize = TRUE, 
-    width = 200,
-    nWidthBins = 20,
-    nGCBins = 20,
+    width = 300,
+    nWidthBins = 30,
+    nGCBins = 10,
     cuts = c(0,120,300,500),
     minFrag = 30,
     maxFrag = 3000,
+    smooth = "none",
+    aRange = 0,
     ...) {
     
     rowType <- match.arg(rowType, choices=c("peaks", "motifs"))  
     mode <- match.arg(mode, choices=c("total", "weight"))  
     # get fragments ranges
-    atacFrag <- .importFragments(files)
+    if (is.null(atacFrag)) atacFrag <- .importFragments(files)
     
     # sanity check
     .sanityCheck(atacFrag, ranges, type = rowType)
+    
+    # standard chromosomes
+    ranges <- .standardChromosomes(ranges, species = species)
+    atacFrag <- lapply(atacFrag, function(dt) {
+        gr <- dtToGr(dt)
+        gr <- .standardChromosomes(gr, species = species)
+        as.data.table(gr)
+    })
+
+    
     
     # filter too short or too long fragments
     atacFrag <- .filterFrags(atacFrag, min = minFrag, max = maxFrag)
@@ -674,12 +732,15 @@ getCounts <- function (files,
           atacFrag = atacFrag,
           mode = mode,
           cuts = cuts,
-          genome = genome)
+          genome = genome,
+          smooth = smooth,
+          aRange = aRange,
+          species = species)
     } else if (rowType=="motifs"){
         if (mode=="weight") {
           atacFrag <- .weightFragments(atacFrag, genome)
         }
-        lst <- lapply(names(atacFrag), \(x) {
+        lst <- lapply(names(atacFrag), function(x) {
             frag <- atacFrag[[x]]
             frag$sample <- x
             frag
@@ -697,7 +758,7 @@ getCounts <- function (files,
 # files <- list("ctrl1"="ctrl1.bed", "ctrl2"="ctrl2.bed",
 # "treat1"="treat1.bed", "treat2"="treat2.bed")
 
-# motifData <- lapply(names(motifRanges), \(x) {
+# motifData <- lapply(names(motifRanges), function(x) {
 #   gr <- motifRanges[[x]]
 #   mcols(gr)$motif <- x
 #   gr
