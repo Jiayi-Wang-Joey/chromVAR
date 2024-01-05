@@ -628,9 +628,10 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     fragDt[, bin:=paste0(widthBin, GCBin)]
     fragDt[, bin:=as.numeric(as.factor(bin))]
     fragDt[,count_bin:=.N, by=c("sample", "bin")]
-    tmp <- fragDt[,.(mean_count_bin=mean(count_bin, na.rm=TRUE)), by=c("bin")]
+    fragDt[,freq_bin:=(count_bin+1L)/(nrow(fragDt)+1L)]
+    tmp <- fragDt[,.(mean_freq_bin=mean(freq_bin, na.rm=TRUE)), by=c("bin")]
     fragDt <- merge(fragDt, tmp, by = "bin")
-    fragDt[,weight:=mean_count_bin/count_bin]
+    fragDt[,weight:=mean_freq_bin/freq_bin]
     if (smooth=="none") {
       return(split(fragDt, fragDt$sample))
     } else if (smooth=="smooth.2d") {
