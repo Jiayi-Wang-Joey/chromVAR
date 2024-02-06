@@ -483,18 +483,20 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 #' each data.table represents a sample
 #' return a list of count table; by all, nucleosome-free, mono...
 .getOverlapCounts <- function(peakRanges, 
-  atacFrag,
-  mode = c("total", "weight"),
-  cuts,
-  genome,
-  overlap = c("any", "start", "end", "within", "equal"),
-  smooth, 
-  aRange,
-  ...
-  #overlaps = c("any",...)
+    atacFrag,
+    mode = c("total", "weight"),
+    cuts,
+    genome,
+    overlap = c("any", "start", "end", "within", "equal"),
+    smooth, 
+    aRange,
+    peakWeight = c("none", "loess", "lm", "wlm", "tlm", "wtlm"),
+    ...
   ) {
   
     by <- match.arg(mode, choices = c("total", "weight"))
+    peakWeight <- match.arg(peakWeight, 
+        choices = c("none", "loess", "lm", "wlm", "tlm", "wtlm"))
       
     peaks <- data.table::as.data.table(peakRanges)
     peakGR <- peakRanges
@@ -520,7 +522,6 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
       } else {
         frag[,count:=1]
       }
-      #fragGR <- makeGRangesFromDataFrame(as.data.frame(frag))
       fragGR <- dtToGr(frag)
       hits <- findOverlaps(fragGR, peakGR, type = overlap)
       overlaps <- cbind(frag[queryHits(hits),],
@@ -545,6 +546,13 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
       mat
     })
     names(allCounts) <- cols
+    if (peakWeight != "none") {
+        allCounts[["counts"]] <- .weightPeaks(allCounts[["counts"]], 
+          method=peakWeight)
+        allCounts[["type_1"]] <- .weightPeaks(allCounts[["type_1"]], 
+          method=peakWeight)
+    }
+    
     
     allCounts
     
@@ -618,7 +626,6 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 
 
 .weightFragments <- function (atacFrag, 
-  #cuts = c(0,120,300,500),
   genome,
   smooth = c("none", "smooth.2d"),
   aRange,
@@ -641,7 +648,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
           surface=FALSE, 
           nrow=length(unique(dt$widthBin)), 
           ncol=length(unique(dt$GCBin)),
-          aRange=aRange)
+          aRange=aRange,
+          cov.function=Exp.cov)
         dimnames(sm) <- list(levels(dt$widthBin), levels(dt$GCBin))
         sm
       })
@@ -657,7 +665,60 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     }
 }
 
+#loess, lm, weighted lm, trimmed lm, and weighted trimmed lm
+.weightPeaks <- function(counts, 
+    method = c("loess", "lm", "wlm", "tlm", "wtlm"),
+    trimM = 0.15,
+    trimA = 0.05,
+    ...) {
+    method <- match.arg(method, choices = c("loess", "lm", "wlm", "tlm", "wtlm"))
+    lfc <- sapply(colnames(counts), \(i) log2(counts[,i]/rowMeans(counts))) 
+    lfc[lfc == -Inf] <- 0
+    avg <- rowMeans(counts)
     
+    if (method == "loess") {
+      models <- lapply(colnames(counts), \(x) {
+        df <- data.frame(lfc = lfc[,x], avg=avg)
+        loess(lfc ~ avg, df, 
+          control=loess.control(surface="direct"))
+      })
+    } else if (method == "lm") {
+      models <- lapply(colnames(counts), \(x) {
+        df <- data.frame(lfc = lfc[,x], avg=avg)
+        lm(lfc ~ avg, df)
+      })
+    } else if (method=="wlm") {
+        w <- rowMeans(sqrt(cpm(counts)))
+        models <- lapply(colnames(counts), \(x) {
+          df <- data.frame(lfc = lfc[,x], avg=avg)
+          model <- lm(lfc ~ avg, df, weights=w)
+        })
+    } else {
+      models <- lapply(colnames(counts), \(x){
+        df <- data.frame(lfc = lfc[,x], avg=avg)
+        lqm <- quantile(df$lfc, trimM, na.rm = TRUE)
+        uqm <- quantile(df$lfc, 1-trimM, na.rm = TRUE)
+        lqa <- quantile(df$avg, trimA, na.rm = TRUE)
+        uqa <- quantile(df$avg, 1-trimA, na.rm = TRUE)
+        trimRes <- df %>%
+          filter(
+            lfc >= lqm & lfc <= uqm,
+            avg >= lqa & avg <= uqa
+          )
+        if (method=="wtlm") {
+          lm(lfc ~ avg, trimRes, weights=sqrt(2^(trimRes$avg)))
+        } else {
+          lm(lfc ~ avg, trimRes)
+        }
+      })
+        
+        
+    }
+    newLFC <- sapply(models, \(model) predict(model, data.frame(avg=avg)))
+    res <- 2^(-newLFC)*counts
+    colnames(res) <- colnames(counts)
+    return(res)
+}
 
 
 
@@ -688,17 +749,21 @@ getCounts <- function (files,
     paired = TRUE,
     resize = TRUE, 
     width = 300,
-    nWidthBins = 30,
+    nWidthBins = 20,
     nGCBins = 10,
     cuts = c(0,120,300,500),
     minFrag = 30,
     maxFrag = 3000,
-    smooth = "none",
+    smooth = c("none", "smooth.2d"),
     aRange = 0,
+    peakWeight = c("none", "loess", "lm", "wlm", "tlm", "wtlm"),
     ...) {
     
     rowType <- match.arg(rowType, choices=c("peaks", "motifs"))  
     mode <- match.arg(mode, choices=c("total", "weight"))  
+    smooth <- match.arg(smooth, c("none", "smooth.2d"))
+    peakWeight <- match.arg(peakWeight, 
+      choices=c("none", "loess", "lm", "wlm", "tlm", "wtlm"))  
     # get fragments ranges
     if (is.null(atacFrag)) atacFrag <- .importFragments(files)
     
@@ -736,7 +801,8 @@ getCounts <- function (files,
           genome = genome,
           smooth = smooth,
           aRange = aRange,
-          species = species)
+          species = species,
+          peakWeight = peakWeight)
     } else if (rowType=="motifs"){
         if (mode=="weight") {
           atacFrag <- .weightFragments(atacFrag, genome)
@@ -756,22 +822,3 @@ getCounts <- function (files,
 
 }
 
-# files <- list("ctrl1"="ctrl1.bed", "ctrl2"="ctrl2.bed",
-# "treat1"="treat1.bed", "treat2"="treat2.bed")
-
-# motifData <- lapply(names(motifRanges), function(x) {
-#   gr <- motifRanges[[x]]
-#   mcols(gr)$motif <- x
-#   gr
-# })
-# 
-# motifs <- bind_ranges(motifData)
-
-
-# s <- Sys.time()
-# se <- getCounts(files, ranges = motifs, rowType = "motifs", mode = "weight",
-#     genome = BSgenome.Hsapiens.UCSC.hg38)
-# e <- Sys.time()
-# e-s
-
-# compare t-values of perturbed motifs to original chromVAR
