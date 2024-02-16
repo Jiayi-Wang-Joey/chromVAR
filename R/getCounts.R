@@ -490,6 +490,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     overlap = c("any", "start", "end", "within", "equal"),
     smooth, 
     aRange,
+    nWidthBins,
+    nGCBins,
     peakWeight = c("none", "loess", "lm", "wlm", "tlm", "wtlm"),
     ...
   ) {
@@ -508,6 +510,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
       frags <- .weightFragments(frags, 
         genome = genome, 
         smooth = smooth,
+        nGCBins = nGCBins,
+        nWidthBins = nWidthBins,
         aRange = aRange)
     }
     
@@ -628,10 +632,13 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 .weightFragments <- function (atacFrag, 
   genome,
   smooth = c("none", "smooth.2d"),
+  nWidthBins,
+  nGCBins,
   aRange,
   ...) {
     smooth <- match.arg(smooth, choices = c("none", "smooth.2d"))
-    fragDt <- .getBins(atacFrag, genome = genome)
+    fragDt <- .getBins(atacFrag, genome = genome, 
+      nWidthBins = nWidthBins, nGCBins = nGCBins)
     fragDt[, bin:=paste0(widthBin, GCBin)]
     fragDt[, bin:=as.numeric(as.factor(bin))]
     fragDt[,count_bin:=.N, by=c("sample", "bin")]
@@ -672,19 +679,61 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     trimA = 0.05,
     ...) {
     method <- match.arg(method, choices = c("loess", "lm", "wlm", "tlm", "wtlm"))
-    lfc <- sapply(colnames(counts), \(i) log2(counts[,i]/rowMeans(counts))) 
-    lfc[lfc == -Inf] <- 0
+    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMeans(counts)+1L))) 
     avg <- rowMeans(counts)
     
     if (method == "loess") {
-      models <- lapply(colnames(counts), \(x) {
-        df <- data.frame(lfc = lfc[,x], avg=avg)
-        loess(lfc ~ avg, df, 
-          control=loess.control(surface="direct"))
-      })
+      if(nrow(counts) <= 1e4) {
+        models <-  lapply(colnames(counts), \(x) {
+          df <- data.frame(lfc = lfc[,x], avg=avg)
+          loess(lfc ~ avg, df, span=0.5,
+            control=loess.control(surface="direct"))
+        })
+      } else {
+        nBins <- 15
+        nSample <- 1e5
+        logAvg <- log1p(avg)
+        bins <- cut(logAvg,
+          breaks = seq(min(logAvg), max(logAvg), (max(logAvg)-min(logAvg))/nBins),
+          include.lowest = TRUE)
+        idx <- unlist(sapply(seq_len(length(levels(bins))), \(i) {
+          ids <- which(bins==levels(bins)[i])
+          if (length(ids) > 1)
+            sample(ids,
+              size = min(length(ids), round(nSample/nBins)))
+          else if (length(ids)==1)
+            ids
+          else NULL
+        }))
+        #idx <- sample(seq_len(nrow(counts)), nSample)
+        subcounts <- counts[idx,]
+        sublfc <- lfc[idx,]
+        subavg <- avg[idx]
+        models <-  lapply(colnames(counts), \(x) {
+          df <- data.frame(lfc = sublfc[,x], avg=subavg)
+          loess(lfc ~ avg, df, span=0.5,
+            control=loess.control(surface="direct"))
+        })
+      }
+
+      
+      #loess_fit <- function(split){
+      #  loess(lfc ~ avg, analysis(split), span=0.3,
+      #    control=loess.control(surface="direct"))
+      #}
+      
+      #newLFC <- sapply(colnames(counts), \(x) {
+      #  df <- data.frame(lfc = sublfc[,x], avg=subavg)
+      #  bootstrap <- bootstraps(df, times = 10)
+      #  lfc <- lapply(bootstrap$splits, \(splt) {
+      #    fit <- loess_fit(splt)
+      #    res <- predict(fit, data.frame(avg=avg))
+      #    }) 
+      #  res <- rowMeans(do.call(cbind, lfc))
+      #})
     } else if (method == "lm") {
       models <- lapply(colnames(counts), \(x) {
-        df <- data.frame(lfc = lfc[,x], avg=avg)
+        df <- data.frame(lfc=lfc[,x], avg=avg)
         lm(lfc ~ avg, df)
       })
     } else if (method=="wlm") {
@@ -714,10 +763,15 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         
         
     }
+    #if (method != "loess") {
+    #  newLFC <- sapply(models, \(model) predict(model, data.frame(avg=avg)))
+    #  res <- 2^(-newLFC)*counts
+    #} 
     newLFC <- sapply(models, \(model) predict(model, data.frame(avg=avg)))
     res <- 2^(-newLFC)*counts
     colnames(res) <- colnames(counts)
     return(res)
+
 }
 
 
@@ -749,7 +803,7 @@ getCounts <- function (files,
     paired = TRUE,
     resize = TRUE, 
     width = 300,
-    nWidthBins = 20,
+    nWidthBins = 30,
     nGCBins = 10,
     cuts = c(0,120,300,500),
     minFrag = 30,
@@ -802,6 +856,8 @@ getCounts <- function (files,
           smooth = smooth,
           aRange = aRange,
           species = species,
+          nWidthBins = nWidthBins,
+          nGCBins = nGCBins,
           peakWeight = peakWeight)
     } else if (rowType=="motifs"){
         if (mode=="weight") {
