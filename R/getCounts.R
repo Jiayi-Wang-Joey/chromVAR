@@ -1,4 +1,4 @@
-setDTthreads(8)
+#setDTthreads(8)
 .importFragments <- function(fragData, chunkSize=10)
   {
     if(is.list(fragData))
@@ -191,6 +191,19 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   setnames(dt, seqCol, "seqnames", skip_absent = TRUE)
   gr <- GRanges(seqnames=dt[[seqCol]], ranges=IRanges(start=dt[[startCol]], 
                                                       end=dt[[endCol]]))
+  mcols(gr)$count <- dt$count
+  if (!is.null(dt$sample)) {
+      mcols(gr)$sample <- dt$sample
+  }
+  
+  if (!is.null(dt$motif)) {
+      mcols(gr)$motif <- dt$motif
+  }
+  
+  if (!is.null(dt$barcode)) {
+      mcols(gr)$barcode <- dt$barcode
+  }
+  
   if(startCol==endCol)
   {
     gr <- GPos(seqnames=dt[[seqCol]], pos=dt[[startCol]])
@@ -493,6 +506,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     nWidthBins,
     nGCBins,
     peakWeight = c("none", "loess", "lm", "wlm", "tlm", "wtlm"),
+    moderating = FALSE,
+    singleCell,
     ...
   ) {
   
@@ -512,7 +527,9 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         smooth = smooth,
         nGCBins = nGCBins,
         nWidthBins = nWidthBins,
-        aRange = aRange)
+        aRange = aRange,
+        moderating = moderating,
+        singleCell = singleCell)
     }
     
     frags <- .getType(frags, cuts = cuts)
@@ -520,12 +537,10 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     fragCounts <- lapply(frags, function(frag) {
       types <- names(frag)[grepl("^type_", names(frag))]
       if (by == "weight") {
-        frag[,count:=weight]
+        frag[,count:=weight*count]
         frag[,(types) := lapply(.SD, function(x) x*weight), 
           .SDcols = types]
-      } else {
-        frag[,count:=1]
-      }
+      } 
       fragGR <- dtToGr(frag)
       hits <- findOverlaps(fragGR, peakGR, type = overlap)
       overlaps <- cbind(frag[queryHits(hits),],
@@ -591,7 +606,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     res
 }
 
-
+## bin by both fragment length and GC content
 .getBins <- function(atacFrag, 
   nWidthBins = 30, 
   nGCBins = 10, 
@@ -624,40 +639,74 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     
 }
   
-  
 
-## bin by both fragment length and GC content
+#' moderateBinFrequencies
+#'
+#' @param bins A vector of FL/GC bin labels for each element of `counts`
+#' @param samples A vector of sample labels for each element of `counts`
+#' @param counts A vector of counts per sample/bin
+#'
+#' @return A vector of moderated frequencies for each element of `counts`
+#' @author Pierre-Luc
+moderateBinFrequencies <- function (bins, samples, counts) {
+  totPerSamp <- tapply(counts, samples, sum)
+  binFreq <- counts/totPerSamp[samples]
+  mv <- aggregate(binFreq, by=list(bin=bins), FUN=function(x){
+    c(mu=mean(x,na.rm=TRUE), v=var(x, na.rm=TRUE))
+  })
+  mv$mu <- mv$x[,1]
+  mv$v <- mv$x[,2]
+  mv$alpha <- ((1-mv$mu)/mv$v - 1/mv$mu)*mv$mu^2
+  mv$beta <- mv$alpha*(1/mv$mu-1)
+  (counts + mv$alpha[bins])/(totPerSamp[samples] + mv$alpha[bins] + mv$beta[bins])
+}  
+
+
 
 
 .weightFragments <- function (atacFrag, 
-  genome,
-  smooth = c("none", "smooth.2d"),
-  nWidthBins,
-  nGCBins,
-  aRange,
-  ...) {
+    genome,
+    smooth = c("none", "smooth.2d"),
+    nWidthBins,
+    nGCBins,
+    aRange,
+    moderating,
+    ...) {
     smooth <- match.arg(smooth, choices = c("none", "smooth.2d"))
+    #if (singleCell) sample_id <- "barcode" else sample_id <- "sample"
+    #' TODO: check if .getBins can be improved
     fragDt <- .getBins(atacFrag, genome = genome, 
       nWidthBins = nWidthBins, nGCBins = nGCBins)
     fragDt[, bin:=paste0(widthBin, GCBin)]
-    fragDt[, bin:=as.numeric(as.factor(bin))]
-    fragDt[,count_bin:=.N, by=c("sample", "bin")]
-    fragDt[,freq_bin:=(count_bin+1L)/(nrow(fragDt)+1L)]
-    tmp <- fragDt[,.(mean_freq_bin=mean(freq_bin, na.rm=TRUE)), by=c("bin")]
+    fragDt[, bin:=as.integer(as.factor(bin))]
+    fragDt[,count_bin:=sum(count), by=c("sample", "bin")]
+    # add estimateBetaParams
+    if (moderating) {
+      dt <- unique(fragDt, by=c("bin","sample"))
+      dt <- dt[, c("sample", "count_bin", "bin"), with = FALSE]
+      dt$freq_bin <- moderateBinFrequencies(dt$bin, 
+        dt$sample, dt$count_bin)
+      fragDt <- merge(fragDt, dt, by = c("bin","sample"))
+    } else {
+      fragDt[,freq_bin:=(count_bin+1L)/(sum(count_bin)+1L),by=sample]
+    }
+    tmp <- fragDt[,.(mean_freq_bin=mean(freq_bin, na.rm=TRUE)), 
+      by=c("bin")]
     fragDt <- merge(fragDt, tmp, by = "bin")
     fragDt[,weight:=mean_freq_bin/freq_bin]
     if (smooth=="none") {
       return(split(fragDt, fragDt$sample))
     } else if (smooth=="smooth.2d") {
+      #fragDt$GCBin <- factor(fragDt$GCBin)
       dts <- lapply(split(fragDt, fragDt$sample), function(dt) {
         dt[,logWeight:=log2(weight)]
         sm <- smooth.2d(dt$logWeight, x=cbind(dt$widthBin, dt$GCBin), 
           surface=FALSE, 
-          nrow=length(unique(dt$widthBin)), 
-          ncol=length(unique(dt$GCBin)),
+          nrow=length(unique(fragDt$widthBin)), 
+          ncol=length(unique(fragDt$GCBin)),
           aRange=aRange,
           cov.function=Exp.cov)
-        dimnames(sm) <- list(levels(dt$widthBin), levels(dt$GCBin))
+        dimnames(sm) <- list(levels(dt$widthBin), levels(factor(dt$GCBin)))
         sm
       })
       tbl <- melt(dts)
@@ -672,26 +721,39 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     }
 }
 
+
+
+
 #loess, lm, weighted lm, trimmed lm, and weighted trimmed lm
 .weightPeaks <- function(counts, 
     method = c("loess", "lm", "wlm", "tlm", "wtlm"),
+    group_id = NULL,
     trimM = 0.15,
     trimA = 0.05,
     ...) {
     method <- match.arg(method, choices = c("loess", "lm", "wlm", "tlm", "wtlm"))
-    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMeans(counts)+1L))) 
+    ref <- which.max(colSums(sqrt(counts)))
+    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(counts[,ref]+1L))) 
+    #lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMedians(counts)+1L))) 
+    #if (is.null(group_id)) group_id <- rep(LETTERS[1:2],each=ncol(counts)/2)
+    #lfc <- sapply(seq_len(ncol(counts)), \(i) {
+    #  group <- group_id[i]
+    #  group_idx <- which(group_id==group)
+    #  log2((counts[,i]+1L)/(rowMeans(counts[,group_idx])+1L))
+    #})
+    #colnames(lfc) <- colnames(counts)
     avg <- rowMeans(counts)
     
     if (method == "loess") {
       if(nrow(counts) <= 1e4) {
-        models <-  lapply(colnames(counts), \(x) {
+        models <- lapply(colnames(counts), \(x) {
           df <- data.frame(lfc = lfc[,x], avg=avg)
-          loess(lfc ~ avg, df, span=0.5,
+          loess(lfc ~ avg, df, span=0.7, degree = 1,
             control=loess.control(surface="direct"))
         })
       } else {
-        nBins <- 15
-        nSample <- 1e5
+        nBins <- 20
+        nSample <- 1e4
         logAvg <- log1p(avg)
         bins <- cut(logAvg,
           breaks = seq(min(logAvg), max(logAvg), (max(logAvg)-min(logAvg))/nBins),
@@ -705,36 +767,20 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
             ids
           else NULL
         }))
-        #idx <- sample(seq_len(nrow(counts)), nSample)
         subcounts <- counts[idx,]
         sublfc <- lfc[idx,]
         subavg <- avg[idx]
         models <-  lapply(colnames(counts), \(x) {
           df <- data.frame(lfc = sublfc[,x], avg=subavg)
-          loess(lfc ~ avg, df, span=0.5,
+          loess(lfc ~ avg, df, span=0.7, degree=1,
             control=loess.control(surface="direct"))
         })
       }
-
-      
-      #loess_fit <- function(split){
-      #  loess(lfc ~ avg, analysis(split), span=0.3,
-      #    control=loess.control(surface="direct"))
-      #}
-      
-      #newLFC <- sapply(colnames(counts), \(x) {
-      #  df <- data.frame(lfc = sublfc[,x], avg=subavg)
-      #  bootstrap <- bootstraps(df, times = 10)
-      #  lfc <- lapply(bootstrap$splits, \(splt) {
-      #    fit <- loess_fit(splt)
-      #    res <- predict(fit, data.frame(avg=avg))
-      #    }) 
-      #  res <- rowMeans(do.call(cbind, lfc))
-      #})
     } else if (method == "lm") {
-      models <- lapply(colnames(counts), \(x) {
-        df <- data.frame(lfc=lfc[,x], avg=avg)
-        lm(lfc ~ avg, df)
+        
+        models <- lapply(colnames(counts), \(x) {
+          df <- data.frame(lfc=lfc[,x], avg=avg)
+          lm(lfc ~ avg, df)
       })
     } else if (method=="wlm") {
         w <- rowMeans(sqrt(cpm(counts)))
@@ -811,6 +857,8 @@ getCounts <- function (files,
     smooth = c("none", "smooth.2d"),
     aRange = 0,
     peakWeight = c("none", "loess", "lm", "wlm", "tlm", "wtlm"),
+    moderating = FALSE,
+    singleCell = FALSE,
     ...) {
     
     rowType <- match.arg(rowType, choices=c("peaks", "motifs"))  
@@ -849,16 +897,18 @@ getCounts <- function (files,
     
     if (rowType=='peaks') {
         asy <- .getOverlapCounts(peakRanges = ranges, 
-          atacFrag = atacFrag,
-          mode = mode,
-          cuts = cuts,
-          genome = genome,
-          smooth = smooth,
-          aRange = aRange,
-          species = species,
-          nWidthBins = nWidthBins,
-          nGCBins = nGCBins,
-          peakWeight = peakWeight)
+            atacFrag = atacFrag,
+            mode = mode,
+            cuts = cuts,
+            genome = genome,
+            smooth = smooth,
+            aRange = aRange,
+            species = species,
+            nWidthBins = nWidthBins,
+            nGCBins = nGCBins,
+            peakWeight = peakWeight,
+            moderating = moderating,
+            singleCell = singleCell)
     } else if (rowType=="motifs"){
         if (mode=="weight") {
           atacFrag <- .weightFragments(atacFrag, genome)
@@ -873,8 +923,18 @@ getCounts <- function (files,
           motifRanges = ranges, 
           mode = mode)
     }
-    
-    SummarizedExperiment(assays = asy, rowRanges = ranges)
+    if (singleCell) {
+        cd <- rbindlist(lapply(names(atacFrag), \(x) 
+            data.table(sample_id=atacFrag[[x]]$sample[1],
+                group_id=atacFrag[[x]]$motif[1],
+                barcode=x)))
+        cd <- cd[match(cd$barcode, colnames(asy[[1]]))]
+        SummarizedExperiment(assays = asy, 
+            rowRanges = ranges,
+            colData = DataFrame(cd))
+    } else {
+        SummarizedExperiment(assays = asy, rowRanges = ranges)  
+    }
 
 }
 
