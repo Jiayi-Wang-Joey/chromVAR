@@ -230,15 +230,14 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   
   # prep motif data
   motifData <- as.data.table(motifRanges)
-  #setnames(motifData, "seqnames", "chr")
-  chrLevels <- unique(motifData$chr)
+  chrLevels <- unique(motifData$seqnames)
   motifLevels <- unique(motifData$motif_id)
   
   # convert to factors (memory usage)
-  motifData[,chr:=as.integer(factor(chr, 
+  motifData[,seqnames:=as.integer(factor(seqnames, 
     levels=chrLevels, ordered=TRUE))]
-  motifData[,motif_id:=as.integer(factor(motif_id, 
-    levels=motifLevels, ordered=TRUE))]
+  motifData[,motif_id:=factor(motif_id, 
+    levels=motifLevels, ordered=TRUE)]
   
   # determine margins
   motifData[,start_margin:=start-margin]
@@ -249,14 +248,14 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   
   # convert to factors (memory usage)
   atacFrag <- copy(atacFrag) #TODO: take out that copy 
-  atacFrag[,chr:=as.integer(factor(chr, levels=chrLevels, ordered=TRUE))]
+  atacFrag[,seqnames:=as.integer(factor(seqnames, levels=chrLevels, ordered=TRUE))]
   nSamples <- length(unique(atacFrag$sample))
   
   if(chunk){
-    setorder(motifData, chr)
-    setorder(atacFrag, chr)
-    motifData <- split(motifData, by="chr")
-    atacFrag <- split(atacFrag, by="chr")
+    setorder(motifData, seqnames)
+    setorder(atacFrag, seqnames)
+    motifData <- split(motifData, by="seqnames")
+    atacFrag <- split(atacFrag, by="seqnames")
     
     atacInserts <- mapply(function(md,af){
       
@@ -338,16 +337,16 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   # calculate per sample motif scores
   atacInserts[,score:=w*pos_count_sample]
   
-  motifAct <- atacInserts[,.(activity=aggFun(score)), by=.(sample, motif_id)]
-  actMat <- data.table::dcast(motifAct, motif_id~sample, value.var="activity")
-  setorder(actMat, motif_id)
-  rownames(actMat) <- motifLevels
+  # motifAct <- atacInserts[,.(activity=aggFun(score)), by=.(sample, motif_id)]
+  # actMat <- data.table::dcast(motifAct, motif_id~sample, value.var="activity")
+  # setorder(actMat, motif_id)
+  # rownames(actMat) <- motifLevels
+  # 
+  # se <- SummarizedExperiment(list(scores=actMat[,setdiff(colnames(actMat),
+  #    "motif_id"), with=FALSE]))
+  # S4Vectors::metadata(se)$globalProfiles <- atacInserts
   
-  se <- SummarizedExperiment(list(scores=actMat[,setdiff(colnames(actMat), 
-    "motif_id"), with=FALSE]))
-  S4Vectors::metadata(se)$globalProfiles <- atacInserts
-  
-  return(se)
+  return(atacInserts)
 }
 
 
@@ -673,7 +672,6 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     moderating,
     ...) {
     smooth <- match.arg(smooth, choices = c("none", "smooth.2d"))
-    #if (singleCell) sample_id <- "barcode" else sample_id <- "sample"
     #' TODO: check if .getBins can be improved
     fragDt <- .getBins(atacFrag, genome = genome, 
       nWidthBins = nWidthBins, nGCBins = nGCBins)
@@ -684,8 +682,13 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     if (moderating) {
       dt <- unique(fragDt, by=c("bin","sample"))
       dt <- dt[, c("sample", "count_bin", "bin"), with = FALSE]
-      dt$freq_bin <- moderateBinFrequencies(dt$bin, 
-        dt$sample, dt$count_bin)
+      #dts <- lapply(split(dt,dt$motif), \(x) {
+      #    x$freq_bin <- moderateBinFrequencies(x$bin, 
+      #        x$sample, x$count_bin)
+      #    x
+      #})
+      # dt <- rbindlist(dts)
+      dt$freq_bin <- moderateBinFrequencies(dt$bin, dt$sample, dt$count_bin)
       fragDt <- merge(fragDt, dt, by = c("bin","sample"))
     } else {
       fragDt[,freq_bin:=(count_bin+1L)/(sum(count_bin)+1L),by=sample]
@@ -733,8 +736,8 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     ...) {
     method <- match.arg(method, choices = c("loess", "lm", "wlm", "tlm", "wtlm"))
     ref <- which.max(colSums(sqrt(counts)))
-    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(counts[,ref]+1L))) 
-    #lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMedians(counts)+1L))) 
+    #lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(counts[,ref]+1L))) 
+    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMedians(counts)+1L))) 
     #if (is.null(group_id)) group_id <- rep(LETTERS[1:2],each=ncol(counts)/2)
     #lfc <- sapply(seq_len(ncol(counts)), \(i) {
     #  group <- group_id[i]
@@ -777,10 +780,27 @@ moderateBinFrequencies <- function (bins, samples, counts) {
         })
       }
     } else if (method == "lm") {
-        
+        nBins <- 20
+        nSample <- 1e4
+        logAvg <- log1p(avg)
+        bins <- cut(logAvg,
+            breaks = seq(min(logAvg), max(logAvg), (max(logAvg)-min(logAvg))/nBins),
+            include.lowest = TRUE)
+        idx <- unlist(sapply(seq_len(length(levels(bins))), \(i) {
+            ids <- which(bins==levels(bins)[i])
+            if (length(ids) > 1)
+                sample(ids,
+                    size = min(length(ids), round(nSample/nBins)))
+            else if (length(ids)==1)
+                ids
+            else NULL
+        }))
+        subcounts <- counts[idx,]
+        sublfc <- lfc[idx,]
+        subavg <- avg[idx]
         models <- lapply(colnames(counts), \(x) {
-          df <- data.frame(lfc=lfc[,x], avg=avg)
-          lm(lfc ~ avg, df)
+          df <- data.frame(lfc=sublfc[,x], avg=subavg)
+          lm(lfc ~ 0+avg, df)
       })
     } else if (method=="wlm") {
         w <- rowMeans(sqrt(cpm(counts)))
@@ -912,6 +932,7 @@ getCounts <- function (files,
     } else if (rowType=="motifs"){
         if (mode=="weight") {
           atacFrag <- .weightFragments(atacFrag, genome)
+            
         }
         lst <- lapply(names(atacFrag), function(x) {
             frag <- atacFrag[[x]]
