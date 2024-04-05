@@ -332,6 +332,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   motifData <- rbindlist(motifData)
   matchScores <- cbind(motifData[matchScores$motif_match_id,], matchScores)
   matchScores[,chr:=chrLevels[seqnames]]
+  matchScores[,motif_name:=motifLevels[motif_id]]
   
   return(matchScores)
 }
