@@ -330,7 +330,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   
   # get back original coordinates
   motifData <- rbindlist(motifData)
-  matchScores <- cbind(motifData[matchScores$motif_match_id,], matchScores)
+  matchScores <- cbind(motifData[matchScores$motif_match_id,setdiff(colnames(motifData), "score"), with=FALSE], 
+                       matchScores)
   matchScores[,chr:=chrLevels[seqnames]]
   matchScores[,motif_name:=motifLevels[motif_id]]
   
