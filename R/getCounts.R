@@ -189,24 +189,24 @@
 #' @Author: Emanuel Sonder
 dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   setnames(dt, seqCol, "seqnames", skip_absent = TRUE)
-  gr <- GRanges(seqnames=dt[[seqCol]], ranges=IRanges(start=dt[[startCol]], 
-                                                      end=dt[[endCol]]))
+  gr <- GRanges(seqnames=dt[["seqnames"]], ranges=IRanges(start=dt[[startCol]], 
+                                                          end=dt[[endCol]]))
   mcols(gr)$count <- dt$count
   if (!is.null(dt$sample)) {
-      mcols(gr)$sample <- dt$sample
+    mcols(gr)$sample <- dt$sample
   }
   
   if (!is.null(dt$motif)) {
-      mcols(gr)$motif <- dt$motif
+    mcols(gr)$motif <- dt$motif
   }
   
   if (!is.null(dt$barcode)) {
-      mcols(gr)$barcode <- dt$barcode
+    mcols(gr)$barcode <- dt$barcode
   }
   
   if(startCol==endCol)
   {
-    gr <- GPos(seqnames=dt[[seqCol]], pos=dt[[startCol]])
+    gr <- GPos(seqnames=dt[["seqnames"]], pos=dt[[startCol]])
   }
   return(gr)
 }
@@ -217,6 +217,126 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
                                 pruning.mode="coarse")
   seqlevelsStyle(gr) <- "UCSC"
   gr
+}
+
+
+#' @Author: Emanuel Sonder
+.getInsertionProfiles <- function(atacFrag, 
+                                  motifRanges,
+                                  margin=100,
+                                  aggFun=sum,
+                                  #minWidth=30,
+                                  #maxWidth=2000,
+                                  chunk=TRUE){
+  
+  # prep motif data
+  motifData <- as.data.table(motifRanges)
+  setnames(motifData, "seqnames", "chr")
+  chrLevels <- unique(motifData$chr)
+  motifLevels <- unique(motifData$motif_id)
+  
+  # convert to factors (memory usage)
+  motifData[,chr:=as.integer(factor(chr, 
+                                    levels=chrLevels, ordered=TRUE))]
+  motifData[,motif_id:=as.integer(factor(motif_id, 
+                                         levels=motifLevels, ordered=TRUE))]
+  
+  # determine margins
+  motifData[,start_margin:=start-margin]
+  motifData[,end_margin:=end+margin]
+  
+  # determine motif center
+  motifData[,motif_center:=floor((end_margin-start_margin)/2)+start_margin]
+  
+  # convert to factors (memory usage)
+  atacFrag <- copy(atacFrag) #TODO: take out that copy 
+  atacFrag[,chr:=as.integer(factor(chr, levels=chrLevels, ordered=TRUE))]
+  
+  if("seqnames" %in% colnames(atacFrag)){
+    setnames(atacFrag, "seqnames", "chr")
+  }
+  
+  nSamples <- length(unique(atacFrag$sample))
+  
+  setorder(motifData, chr)
+  setorder(atacFrag, chr)
+  motifData[,motif_match_id:=1:nrow(motifData)]
+  motifData <- split(motifData, by="chr")
+  atacFrag <- split(atacFrag, by="chr")
+  
+  atacInserts <- mapply(function(md,af){
+    
+    #md[,motif_match_id:=1:nrow(md)]
+    
+    # convert to granges for faster overlapping
+    motifMarginRanges <- dtToGr(md, startCol="start_margin", endCol="end_margin", seqCol="chr")
+    atacStartRanges <- dtToGr(af, startCol="start", endCol="start", seqCol="chr")
+    atacEndRanges <- dtToGr(af, startCol="end", endCol="end", seqCol="chr")
+    
+    startHits <- findOverlaps(atacStartRanges, 
+                              motifMarginRanges, type="within") # check if type within faster or slower
+    endHits <- findOverlaps(atacEndRanges, motifMarginRanges, type="within") 
+    
+    # get overlapping insertion sites
+    atacStartInserts <- af[queryHits(startHits), c("sample", "start"), with=FALSE]
+    atacEndInserts <-af[queryHits(endHits), c("sample", "end"), with=FALSE]
+    setnames(atacStartInserts, "start", "insert")
+    setnames(atacEndInserts, "end", "insert")
+    
+    ai <- cbind(rbindlist(list(atacStartInserts, atacEndInserts)),
+                rbindlist(list(
+                  md[subjectHits(startHits), c("motif_center", "start", 
+                                               "end", "motif_id", "motif_match_id")],
+                  md[subjectHits(endHits), c("motif_center", "start", "end", "motif_id", 
+                                             "motif_match_id")])))
+    
+    # count insertions around motif
+    ai[,rel_pos:=abs(insert-motif_center)]
+    ai[,type:=fifelse(insert>=start & insert<=end, 1,0)]
+    aiMotif <- subset(ai, type==1)
+    aiMargin <- subset(ai, type==0)
+    
+    aiMotif <- aiMotif[,.(pos_count_sample_match=.N), 
+                       by=.(motif_match_id, rel_pos, sample, motif_id)]
+    aiMotif <- aiMotif[,.(pos_count_sample_match=median(pos_count_sample_match)), 
+                       by=.(motif_match_id, sample, motif_id)]
+    aiMotif$rel_pos <- 0
+    
+    aiMargin <- aiMargin[,.(pos_count_sample_match=.N), 
+                         by=.(motif_match_id, rel_pos, sample, motif_id)]
+    aiMargin[,rel_pos:=rel_pos-min(rel_pos)+1, by=motif_id]
+    rbind(aiMargin, aiMotif)
+  }, 
+  motifData, 
+  atacFrag, 
+  SIMPLIFY=FALSE)
+  
+  # combine insertion counts across chromosomes
+  atacInserts <- rbindlist(atacInserts)
+  atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample_match)), by=.(motif_id, rel_pos, sample)]
+  atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(motif_id, rel_pos)]
+  setorder(atacProfiles, motif_id, rel_pos)
+  atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
+                          twiceit=TRUE), by=motif_id]
+  atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos, motif_id)]
+  atacInserts <- merge(atacInserts, 
+                       atacProfiles[,c("rel_pos", "motif_id", "w"), with=FALSE], 
+                       by.x=c("motif_id", "rel_pos"),
+                       by.y=c("motif_id", "rel_pos"))
+  atacInserts[,score:=w*pos_count_sample_match]
+  
+  # calculate per sample motif match scores
+  matchScores <- atacInserts[,.(score=sum(score)), 
+                             by=.(motif_match_id, sample)]
+  
+  # get back original coordinates
+  motifData <- rbindlist(motifData)
+  matchScores <- cbind(motifData[matchScores$motif_match_id,setdiff(colnames(motifData), "score"), with=FALSE], 
+                       matchScores)
+  matchScores[,chr:=chrLevels[seqnames]]
+  matchScores[,motif_name:=motifLevels[motif_id]]
+  
+  return(matchScores)
 }
 
 
