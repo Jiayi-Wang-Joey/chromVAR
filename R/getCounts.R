@@ -224,7 +224,6 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 .getInsertionProfiles <- function(atacFrag, 
                                   motifRanges,
                                   margin=100,
-                                  aggFun=sum,
                                   #minWidth=30,
                                   #maxWidth=2000,
                                   nullModel=FALSE,
@@ -257,6 +256,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   if("seqnames" %in% colnames(atacFrag)){
     setnames(atacFrag, "seqnames", "chr")
   }
+  
+  medZero <- function(x, len){floor(median(c(rep(0,len-length(x)),x)))}
   
   nSamples <- length(unique(atacFrag$sample))
   
@@ -300,7 +301,9 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     
     aiMotif <- aiMotif[,.(pos_count_sample_match_m=.N), 
                        by=.(motif_match_id, rel_pos, sample, motif_id)]
-    aiMotif <- aiMotif[,.(pos_count_sample_match=median(pos_count_sample_match_m),
+    aiMotif[,ml:=max(rel_pos)-min(rel_pos)+1, by=motif_id]
+    
+    aiMotif <- aiMotif[,.(pos_count_sample_match=medZero(pos_count_sample_match_m, data.table::first(ml)),
                           pos_count_sample_match_m=sum(pos_count_sample_match_m)), 
                        by=.(motif_match_id, sample, motif_id)]
     aiMotif$rel_pos_m <- 0
@@ -308,7 +311,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     aiMargin <- aiMargin[,.(pos_count_sample_match=.N), 
                          by=.(motif_match_id, rel_pos, sample, motif_id)]
     aiMargin[,pos_count_sample_match_m:=pos_count_sample_match]
-    aiMargin[,rel_pos_m:=rel_pos-min(rel_pos)+1, by=motif_id]
+    aiMargin[,rel_pos_m:=rel_pos-min(abs(rel_pos))*sign(rel_pos)+1, by=motif_id]
     rbind(aiMargin, aiMotif, fill=TRUE)
   }, 
   motifData, 
@@ -318,8 +321,10 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   # combine insertion counts across chromosomes
   atacInserts <- rbindlist(atacInserts)
   if(!nullModel){
-  atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample_match)), by=.(motif_id, rel_pos_m, sample)]
-  atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(motif_id, rel_pos_m)]
+  atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample_match)), 
+                              by=.(motif_id, rel_pos_m, sample)]
+  atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), 
+                               by=.(motif_id, rel_pos_m)]
   setorder(atacProfiles, motif_id, rel_pos_m)
   atacProfiles[,w:=smooth(pos_count_global, #/sum(pos_count_global),
                           twiceit=TRUE), by=motif_id]
@@ -352,10 +357,12 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
                        matchScores)
   matchScores[,chr:=chrLevels[seqnames]]
   matchScores[,motif_name:=motifLevels[motif_id]]
-  return(list(ms=matchScores, ap=atacProfiles))
+  gc()
+  return(list(ms=matchScores, ap=atacProfiles, ai=atacInserts))
   }
   else
   {
+    gc()
     return(atacInserts)
   }
 }
