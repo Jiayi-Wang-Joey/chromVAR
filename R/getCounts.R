@@ -697,8 +697,7 @@ moderateBinFrequencies <- function (bins, samples, counts) {
           surface=FALSE, 
           nrow=length(unique(fragDt$widthBin)), 
           ncol=length(unique(fragDt$GCBin)),
-          aRange=aRange,
-          cov.function=Exp.cov)
+          aRange=aRange)
         dimnames(sm) <- list(levels(dt$widthBin), levels(factor(dt$GCBin)))
         sm
       })

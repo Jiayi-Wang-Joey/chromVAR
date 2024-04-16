@@ -1,11 +1,10 @@
 suppressPackageStartupMessages({
     source("~/chromVAR/R/getCounts.R")
-    source("/mnt/plger/esonder/R/tfbs_pred_comp/package/package/R/TfBindingMultiAssay.R")
     library(motifmatchr)
 })
 
 #' @author Emanuel Sonder
-.getInsertionProfiles <- function(fragDt, 
+.getInsertionProfiles <- function(atacFrag, 
     motifRanges,
     margin=100,
     aggFun=sum,
@@ -15,6 +14,7 @@ suppressPackageStartupMessages({
     
     # prep motif data
     motifData <- as.data.table(motifRanges)
+    #setnames(motifData, "seqnames", "chr")
     chrLevels <- unique(motifData$seqnames)
     motifLevels <- unique(motifData$motif_id)
     
@@ -32,22 +32,29 @@ suppressPackageStartupMessages({
     motifData[,motif_center:=floor((end_margin-start_margin)/2)+start_margin]
     
     # convert to factors (memory usage)
-    fragDt[,seqnames:=as.integer(factor(seqnames, levels=chrLevels, ordered=TRUE))]
+    atacFrag <- copy(atacFrag) #TODO: take out that copy 
+    atacFrag[,seqnames:=as.integer(factor(seqnames, levels=chrLevels, ordered=TRUE))]
     
-    nSamples <- length(unique(fragDt$sample))
+    # if("seqnames" %in% colnames(atacFrag)){
+    #     setnames(atacFrag, "seqnames", "chr")
+    # }
+    
+    nSamples <- length(unique(atacFrag$sample))
     
     setorder(motifData, seqnames)
-    setorder(fragDt, seqnames)
+    setorder(atacFrag, seqnames)
     motifData[,motif_match_id:=1:nrow(motifData)]
     motifData <- split(motifData, by="seqnames")
-    fragDt <- split(fragDt, by="seqnames")
+    atacFrag <- split(atacFrag, by="seqnames")
     
     atacInserts <- mapply(function(md,af){
         
+        #md[,motif_match_id:=1:nrow(md)]
+        
         # convert to granges for faster overlapping
-        motifMarginRanges <- dtToGr(md, startCol="start_margin", endCol="end_margin")
-        atacStartRanges <- dtToGr(af, startCol="start", endCol="start")
-        atacEndRanges <- dtToGr(af, startCol="end", endCol="end")
+        motifMarginRanges <- dtToGr(md, startCol="start_margin", endCol="end_margin", seqCol="seqnames")
+        atacStartRanges <- dtToGr(af, startCol="start", endCol="start", seqCol="seqnames")
+        atacEndRanges <- dtToGr(af, startCol="end", endCol="end", seqCol="seqnames")
         
         startHits <- findOverlaps(atacStartRanges, 
             motifMarginRanges, type="within") # check if type within faster or slower
@@ -63,9 +70,8 @@ suppressPackageStartupMessages({
             rbindlist(list(
                 md[subjectHits(startHits), c("motif_center", "start", 
                     "end", "motif_id", "motif_match_id")],
-                md[subjectHits(endHits), 
-                    c("motif_center", "start", "end", 
-                        "motif_id", "motif_match_id")])))
+                md[subjectHits(endHits), c("motif_center", "start", "end", "motif_id", 
+                    "motif_match_id")])))
         
         # count insertions around motif
         ai[,rel_pos:=abs(insert-motif_center)]
@@ -73,53 +79,417 @@ suppressPackageStartupMessages({
         aiMotif <- subset(ai, type==1)
         aiMargin <- subset(ai, type==0)
         
-        aiMotif <- aiMotif[,.(pos_count_sample_match=.N), 
+        aiMotif <- aiMotif[,.(pos_count_sample_match_m=.N), 
             by=.(motif_match_id, rel_pos, sample, motif_id)]
-        aiMotif <- aiMotif[,.(pos_count_sample_match=median(pos_count_sample_match)), 
+        aiMotif <- aiMotif[,.(pos_count_sample_match=median(pos_count_sample_match_m),
+            pos_count_sample_match_m=sum(pos_count_sample_match_m)), 
             by=.(motif_match_id, sample, motif_id)]
-        aiMotif$rel_pos <- 0
+        aiMotif$rel_pos_m <- 0
         
         aiMargin <- aiMargin[,.(pos_count_sample_match=.N), 
             by=.(motif_match_id, rel_pos, sample, motif_id)]
-        aiMargin[,rel_pos:=rel_pos-min(rel_pos)+1, by=motif_id]
-        rbind(aiMargin, aiMotif)
+        aiMargin[,pos_count_sample_match_m:=pos_count_sample_match]
+        aiMargin[,rel_pos_m:=rel_pos-min(rel_pos)+1, by=motif_id]
+        rbind(aiMargin, aiMotif, fill=TRUE)
     }, 
         motifData, 
-        fragDt, 
+        atacFrag, 
         SIMPLIFY=FALSE)
     
     # combine insertion counts across chromosomes
     atacInserts <- rbindlist(atacInserts)
-    atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample_match)), 
-        by=.(motif_id, rel_pos, sample)]
-    atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), 
-        by=.(motif_id, rel_pos)]
-    setorder(atacProfiles, motif_id, rel_pos)
+    atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample_match)), by=.(motif_id, rel_pos_m, sample)]
+    atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(motif_id, rel_pos_m)]
+    setorder(atacProfiles, motif_id, rel_pos_m)
     atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
         twiceit=TRUE), by=motif_id]
-    atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos, motif_id)]
+    atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos_m, motif_id)]
     atacInserts <- merge(atacInserts, 
-        atacProfiles[,c("rel_pos", "motif_id", "w"), with=FALSE], 
-        by.x=c("motif_id", "rel_pos"),
-        by.y=c("motif_id", "rel_pos"))
+        atacProfiles[,c("rel_pos_m", "motif_id", "w"), with=FALSE], 
+        by.x=c("motif_id", "rel_pos_m"),
+        by.y=c("motif_id", "rel_pos_m"))
+    #atacInserts[,pos_count_sample_match_norm:=(pos_count_sample_match_m/sum(pos_count_sample_match_m))*1e4, by=sample]
     atacInserts[,score:=w*pos_count_sample_match]
-    # discuss
-    atacInserts[,pos_count_sample_match_norm:=
-            (pos_count_sample_match/sum(pos_count_sample_match))*1e4, by=sample]
+    
     # calculate per sample motif match scores
     matchScores <- atacInserts[,.(score=sum(score)), 
         by=.(motif_match_id, sample)]
     
     # get back original coordinates
     motifData <- rbindlist(motifData)
-    matchScores <- cbind(motifData[matchScores$motif_match_id,
-        setdiff(colnames(motifData), "score"), with=FALSE], 
+    matchScores <- cbind(motifData[matchScores$motif_match_id,setdiff(colnames(motifData), "score"), with=FALSE], 
         matchScores)
     matchScores[,seqnames:=chrLevels[seqnames]]
-    #matchScores[,motif_name:=motifLevels[motif_id]]
+    # matchScores[,motif_name:=motifLevels[motif_id]]
     
     return(matchScores)
 }
+
+
+.getInserts <- function(atacFrag, 
+    coords,
+    margin=10,
+    aggFun=sum,
+    #minWidth=30,
+    #maxWidth=2000,
+    getType=TRUE,
+    chunk=TRUE){
+    
+    cDt <- as.data.table(coords)
+    cDt$id <- seq_len(nrow(cDt))
+    #setnames(cDt, "seqnames", "chr")
+    cdl <- unique(cDt$seqnames)
+    idl <- unique(cDt$id)
+    
+    # convert to factors (memory usage)
+    cDt[,seqnames:=as.integer(factor(seqnames, levels=cdl, ordered=TRUE))]
+    cDt[,id:=as.integer(factor(id, levels=idl, ordered=TRUE))]
+    
+    # determine margins
+    cDt[,start_margin:=start-margin]
+    cDt[,end_margin:=end+margin]
+    
+    # determine motif center
+    cDt[,center:=floor((end_margin-start_margin)/2)+start_margin]
+    
+    # convert to factors (memory usage)
+    fDt <- copy(atacFrag) 
+    fDt <- subset(fDt, seqnames %in% cdl) # frags on different chromosome don't need to be considered
+    fDt[,seqnames:=as.integer(factor(seqnames, levels=cdl, ordered=TRUE))]
+    
+    if(chunk){
+        setorder(cDt, seqnames)
+        setorder(fDt, seqnames)
+        cDts <- split(cDt, by="seqnames")
+        fDts <- split(fDt, by="seqnames")
+        
+        ins <- mapply(function(cDt, fDt){
+            
+            # convert to granges for faster overlapping
+            # coordinate margin ranges
+            cr <- dtToGr(cDt, startCol="start_margin", endCol="end_margin", seqCol="seqnames")
+            # start ranges
+            sr <- dtToGr(fDt, startCol="start", endCol="start", seqCol="seqnames")
+            # end ranges
+            er <- dtToGr(fDt, startCol="end", endCol="end", seqCol="seqnames")
+            
+            sHits <- findOverlaps(sr, cr, type="within") 
+            eHits <- findOverlaps(er, cr, type="within") 
+            
+            # get overlapping insertion sites
+            sIns <- fDt[queryHits(sHits), c("sample", "start"), with=FALSE]
+            eIns <- fDt[queryHits(eHits), c("sample", "end"), with=FALSE]
+            setnames(sIns, "start", "insert")
+            setnames(eIns, "end", "insert")
+            
+            ai <- cbind(rbindlist(list(sIns, eIns)),
+                rbindlist(list(cDt[subjectHits(sHits), c("center", "id")],
+                    cDt[subjectHits(eHits), c("center", "id")])))
+            
+            # count insertions around motif
+            ai[,rel_pos:=abs(insert-center)]}, 
+            cDts, 
+            fDts, 
+            SIMPLIFY=FALSE)
+        
+        # combine insertion counts across chromosomes
+        names(ins) <- cdl
+        ins <- rbindlist(ins, idcol="seqnames")
+    }
+    else
+    {
+        # convert to granges for faster overlapping
+        cr <- dtToGr(cDt, startCol="start_margin", endCol="end_margin", seqCol="seqnames")
+        sr <- dtToGr(fDt, startCol="start", endCol="start", seqCol="seqnames")
+        er <- dtToGr(fDt, startCol="end", endCol="end", seqCol="seqnames")
+        
+        sHits <- findOverlaps(sr, cr, type="within") # check if type within faster or slower
+        eHits <- findOverlaps(er, cr, type="within") 
+        
+        # get overlapping insertion sites
+        sIns <- fDt[queryHits(sHits), c("sample", "start"), with=FALSE]
+        eIns <- fDt[queryHits(eHits), c("sample", "end"), with=FALSE]
+        setnames(sIns, "start", "insert")
+        setnames(eIns, "end", "insert")
+        
+        ins <- cbind(rbindlist(list(sIns, eIns)),
+            rbindlist(list(cDt[subjectHits(sHits), c("center", "id", "seqnames")],
+                cDt[subjectHits(eHits), c("center", "id", "seqnames")])))
+        
+        # count insertions around motif
+        ins[,rel_pos:=abs(insert-center)]
+        
+        # convert chr naming back 
+        ins[,seqnames:=factor(seqnames, levels=1:length(cdl), labels=cdl)]
+    }
+    
+    if(getType)
+    {
+        # width of side
+        mw <- median(width(coords))
+        
+        ins[,start:=center-floor(mw/2)]
+        ins[,end:=center+floor(mw/2)]
+        ins[,type:=fifelse(insert>=start & insert<=end, "within", "margin")]
+    }
+    
+    return(ins)
+}
+
+
+.getInsertionBgProfiles <- function(atacFrag, 
+    coords,
+    #minWidth=30,
+    #maxWidth=2000,
+    chunk=TRUE){
+    
+    # prep motif data
+    coordData <- as.data.table(coords)
+    setnames(coordData, "seqnames", "chr")
+    chrLevels <- unique(coordData$chr)
+    motifLevels <- unique(coordData$id)
+    
+    # convert to factors (memory usage)
+    
+    coordData[,chr:=as.integer(factor(chr, 
+        levels=chrLevels, ordered=TRUE))]
+    coordData[,id:=as.integer(factor(id, levels=motifLevels, ordered=TRUE))]
+    
+    # determine motif center
+    coordData[,center:=floor((end-start)/2)+start]
+    
+    # convert to factors (memory usage)
+    if("seqnames" %in% colnames(atacFrag)){
+        setnames(atacFrag, "seqnames", "chr")
+    }
+    atacFrag <- copy(atacFrag) #TODO: take out that copy 
+    atacFrag[,chr:=as.integer(factor(chr, levels=chrLevels, ordered=TRUE))]
+    
+    # if("seqnames" %in% colnames(atacFrag)){
+    #   setnames(atacFrag, "seqnames", "chr")
+    # }
+    
+    nSamples <- length(unique(atacFrag$sample))
+    
+    setorder(coordData, chr)
+    setorder(atacFrag, chr)
+    coordData[,coord_id:=1:nrow(coordData)]
+    coordData <- split(coordData, by="chr")
+    atacFrag <- split(atacFrag, by="chr")
+    
+    atacInserts <- mapply(function(md,af){
+        
+        #md[,motif_match_id:=1:nrow(md)]
+        
+        # convert to granges for faster overlapping
+        coordRanges <- dtToGr(md, startCol="start", endCol="end", seqCol="chr")
+        atacStartRanges <- dtToGr(af, startCol="start", endCol="start", seqCol="chr")
+        atacEndRanges <- dtToGr(af, startCol="end", endCol="end", seqCol="chr")
+        
+        startHits <- findOverlaps(atacStartRanges, 
+            coordRanges, type="within") # check if type within faster or slower
+        endHits <- findOverlaps(atacEndRanges, coordRanges, type="within") 
+        
+        # get overlapping insertion sites
+        atacStartInserts <- af[queryHits(startHits), c("sample", "start"), with=FALSE]
+        atacEndInserts <-af[queryHits(endHits), c("sample", "end"), with=FALSE]
+        setnames(atacStartInserts, "start", "insert")
+        setnames(atacEndInserts, "end", "insert")
+        
+        ai <- cbind(rbindlist(list(atacStartInserts, atacEndInserts)),
+            rbindlist(list(
+                md[subjectHits(startHits), c("center", "start", 
+                    "end", "id", "coord_id")],
+                md[subjectHits(endHits), c("center", "start", "end", "id", 
+                    "coord_id")])))
+        
+        # count insertions around motif
+        ai[,rel_pos:=abs(insert-center)]
+        
+        ai <- ai[,.(pos_count_sample=.N),  by=.(coord_id, rel_pos, sample, id)]
+        ai
+    }, 
+        coordData, 
+        atacFrag, 
+        SIMPLIFY=FALSE)
+    
+    # combine insertion counts across chromosomes
+    atacInserts <- rbindlist(atacInserts)
+    atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample)), by=.(id, rel_pos, sample)]
+    atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(id, rel_pos)]
+    setorder(atacProfiles, id, rel_pos)
+    atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
+        twiceit=TRUE), by=id]
+    atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos, id)]
+    atacInserts <- merge(atacInserts, 
+        atacProfiles[,c("rel_pos", "id", "w"), with=FALSE], 
+        by.x=c("id", "rel_pos"),
+        by.y=c("id", "rel_pos"))
+    #atacInserts[,pos_count_sample_norm:=(pos_count_sample/sum(pos_count_sample))*1e4, by=sample]
+    atacInserts[,score:=w*pos_count_sample]
+    
+    
+    # calculate per sample motif match scores
+    scores <- atacInserts[,.(score=sum(score)), by=.(coord_id, sample)]
+    #scores[,score:=sum(score),by=id]
+    
+    # get back original coordinates
+    coordData <- rbindlist(coordData)
+    scores <- cbind(coordData[scores$coord_id,setdiff(colnames(coordData), "score"), with=FALSE], 
+        scores)
+    scores[,chr:=chrLevels[seqnames]]
+    #scores[,motif_name:=motifLevels[motif_id]]
+    
+    return(scores)
+}
+
+.genomicRangesMapping <- function(refRanges, 
+    assayTable,
+    byCols=c("tf_uniprot_id",
+        "cell_type_id"),
+    seqNamesCol="chr",
+    startCol="start",
+    endCol="end",
+    scoreCol=NULL,
+    calledInCol=NULL,
+    aggregationFun=NULL,
+    minoverlap=1,
+    isReplicated=FALSE,
+    BPPARAM=SerialParam()){
+    # TODO: - add warning for integer overflows - data.table size
+    assayTable <- copy(assayTable)  
+    
+    # attribute generic names to dimensionalities
+    if(length(byCols)==2)
+    {
+        setnames(assayTable, byCols, c("col_depth", "col_width"))
+        byCols <- c("col_depth", "col_width")
+        multiTf <- TRUE
+    }
+    else
+    {
+        setnames(assayTable, byCols, c("col_width"))
+        byCols <- c("col_width")
+        multiTf <- FALSE
+    }
+    
+    # get dimensions of tables
+    nRefs <- length(refRanges)
+    nColsWidth <- length(unique(assayTable$col_width))
+    
+    # convert to integer for speed-up
+    levels <- unique(assayTable$col_width)
+    assayTable[,col_width:=as.integer(factor(assayTable$col_width, levels=levels))]
+    
+    # convert to GRanges for faster overlap finding
+    assayRanges <- makeGRangesFromDataFrame(as.data.frame(assayTable),
+        keep.extra.columns=TRUE,
+        seqnames.field=seqNamesCol,
+        start.field=startCol,
+        end.field=endCol,
+        ignore.strand=TRUE)
+    
+    # find overlaps with ref. coordinates
+    overlapTable <- as.data.table(findOverlaps(assayRanges, refRanges,
+        type="within",
+        minoverlap=minoverlap,
+        ignore.strand=TRUE))
+    rm(refRanges, assayRanges)
+    
+    
+    # retrieve tf and cell type ids
+    overlapTable <- cbind(overlapTable$subjectHits,
+        assayTable[overlapTable$queryHits,
+            c(byCols, scoreCol, calledInCol), with=FALSE])
+    
+    if(multiTf)
+    {
+        setkey(overlapTable, V1, col_width)
+        if(!is.null(calledInCol)) setnames(overlapTable, calledInCol, "calledInCol")
+        if(!is.null(scoreCol)) setnames(overlapTable, scoreCol, "scoreCol")
+        overlapTable <- split(overlapTable, by=c("col_depth"))
+        
+        #TODO:  BPPARAM= serialParam or multiCoreParam() as function arguments
+        #TODO:  bplapply(fls[1:3], FUN, BPPARAM = MulticoreParam(), param = param)
+        # overlap with ref. coordinates
+        overlapTable <- BiocParallel::bplapply(overlapTable, function(table){
+            
+            if(is.null(aggregationFun))
+            {
+                # get number of max callers
+                #table[, n_max:=length(unique(calledInCol)), 
+                #        by=c("col_width")]
+                
+                if(isReplicated)
+                {
+                    table[,rep:=tstrsplit(calledInCol, split="-", keep=2)]
+                    table[, n_max:=length(unique(calledInCol)), 
+                        by=c("col_width", "rep")]
+                    
+                    table <- table[,.(value=.chIPlabelRule(calledInCol,
+                        data.table::first(n_max))),
+                        by=c("V1", "col_width", "rep")]
+                    table <- table[,.(value=.chIPReplicateLabelRule(value)),
+                        by=c("V1", "col_width")]
+                }
+                else{
+                    table[,n_max:=length(unique(calledInCol)), 
+                        by=c("col_width")]
+                    
+                    table <- table[,.(value=.chIPlabelRule(calledInCol,
+                        data.table::first(n_max))),
+                        by=c("V1", "col_width")]
+                }
+            }
+            else
+            {
+                table <- table[,.(value=aggregationFun(scoreCol)),
+                    by=c("V1", "col_width")]
+            }
+            
+            # one would need to construct a second table here for the neg labels
+            
+            # convert to sparse matrix
+            table <- sparseMatrix(i=table$V1, 
+                j=as.integer(table$col_width), # what if non-numeric cell-id
+                dims=c(nRefs, nColsWidth),
+                x=table$value)
+            colnames(table) <- levels
+            return(table)},
+            BPPARAM=BPPARAM)
+        
+    }
+    else
+    {
+        # setkeys for speed-up
+        overlapTable[,V1:=as.integer(V1)]
+        setkey(overlapTable, col_width, V1)
+        
+        # overlap with ref. coordinates
+        if(is.null(aggregationFun)) error("Aggregation function needs to be defined")
+        
+        # why an lapply 05.04.24
+        #overlapTable <- overlapTable[,.("scoreCol"=lapply(.SD, aggregationFun, na.rm=TRUE)),
+        #                              by=c("col_width", "V1"),
+        #                             .SDcols=scoreCol]
+        setnames(overlapTable, scoreCol, "scoreCol")
+        overlapTable <- overlapTable[,.(scoreCol=aggregationFun(scoreCol)),
+            by=c("col_width", "V1")]
+        
+        # convert to sparse matrix
+        overlapTable <- Matrix::sparseMatrix(i=overlapTable$V1, 
+            j=overlapTable$col_width,
+            dims=c(nRefs, nColsWidth),
+            x=overlapTable$scoreCol)
+        
+        colnames(overlapTable) <- levels
+    }
+    
+    return(overlapTable)
+}
+
+
+
 
 #' Function to get, from the counts-per-match and for a motif of choice, 
 #' a matrix of the counts from the best motif match per peak (0 if none) 
@@ -138,19 +508,12 @@ suppressPackageStartupMessages({
     
     peaks <- as.data.table(peakRange)
     peaks$peakID <- seq_len(nrow(peaks))
-    allRes <- lapply(split(matchScore, matchScore$motif_id), \(motifDt){
-        sampleRes <- sapply(split(motifDt, motifDt$sample), \(dt) {
-            motifRange <- dtToGr(dt, seqCol = seqCol)
-            hits <- findOverlaps(motifRange, peakRange, type="within")
-            overlaps <- cbind(dt[queryHits(hits),],
-                peaks[subjectHits(hits), c("peakID")])
-            tmp <- overlaps[, .(scores = max(score, na.rm = TRUE)), by = peakID]
-            res <- data.table(peakID = seq_len(nrow(peaks)))
-            res <- merge(res, tmp, all=TRUE)
-            res[is.na(res)] <- 0
-            res$scores
-        })
-    })
+    if ("strand" %in% colnames(matchScore)) matchScore$strand <- NULL
+    res <- .genomicRangesMapping(peakRange, matchScore, 
+        byCols=c("motif_id", "sample"), seqNamesCol = seqCol,
+        scoreCol="score", aggregationFun = max)
+    lapply(res, \(x) as.matrix(x))
+
 }
 
 #' Function to get the background peak sets and strongest motif match scores in 
@@ -163,21 +526,47 @@ suppressPackageStartupMessages({
 #' @param niterations number of background peaks to sample
 #' @return a list containing background peak indices and a matrix containing the 
 #' strongest motif match score for peaks per sample
-.getBackgroundPeaks <- function (se, 
-    matchScore, 
-    genome,
-    niterations=10) {
+# .getBackgroundPeaks <- function (se, 
+#     matchScore, 
+#     genome,
+#     niterations=10) {
+#     se <- addGCBias(se,genome=genome)
+#     bg <- getBackgroundPeaks(object=se, niterations=niterations)
+#     if ("strand" %in% colnames(matchScore)) matchScore$strand <- NULL
+#     maxScoreSample <- .genomicRangesMapping(refRanges=rowRanges(se), 
+#         aggregationFun=max,
+#         assayTable=matchScore, 
+#         byCols=c("sample","motif_id"), 
+#         seqNamesCol="seqnames", 
+#         scoreCol="score")
+#     
+#     maxIds <- lapply(maxScoreSample, \(x) {
+#         dt <- as(x,"TsparseMatrix")
+#         #rownames(dt) <- seq_len(nrow(dt))
+#         idDt <- data.table(peakID=dt@i+1, 
+#             motif_id=colnames(x)[dt@j+1], score=dt@x)
+#     })
+#     maxId <- rbindlist(maxIds, idcol="sample")
+#     maxId[,mean_score:=sum(score)/length(meanScorePeak),by=.(peakID, motif_id)]
+#     maxId[,max_score:=max(mean_score),by=peakID]
+#     maxDt <- maxId[maxId$max_score==maxId$mean_score,]
+#     resDt <- data.table(peakID=seq_len(nrow(se)))
+#     resDt <- merge(resDt, maxDt, by = "peakID", all.x=TRUE)
+#     maxScorePeaks <- data.table::dcast(resDt, peakID~sample, fill=0, 
+#          fun.aggregate = mean, value.var = "score", drop=FALSE)
+#     #rownames(maxScorePeaks) <- maxScorePeaks$peakID
+#     maxScorePeaks$`NA` <- NULL
+#     maxScorePeaks$peakID <- NULL
+#     
+#     
+#     return(list(backgroundPeaks=bg, maxScorePeaks=maxScorePeaks))
+# }
+
+
+.getBackgroundPeaks <- function(se, genome, niterations=100) {
     se <- addGCBias(se,genome=genome)
     bg <- getBackgroundPeaks(object=se, niterations=niterations)
-    if ("strand" %in% colnames(matchScore)) matchScore$strand <- NULL
-    maxScorePeaks <- .genomicRangesMapping(refRanges=rowRanges(se), 
-        aggregationFun=max,
-        assayTable=matchScore, 
-        byCols="sample", 
-        seqNamesCol="seqnames", 
-        scoreCol="score")
-    
-    return(list(backgroundPeaks=bg, maxScorePeaks=maxScorePeaks))
+    #bgProfile <- .getInsertionBgProfiles(fragDt, peakRange)
 }
 
 #' get the motif activity score
@@ -188,35 +577,65 @@ suppressPackageStartupMessages({
 #' peaks per sample
 #' @return a list of matrix containing motif activity score on peak level per sample
 
+# .getMotifActivityScore <- function (backgroundPeaks, 
+#     peakMatchScore, 
+#     maxScorePeaks) {
+#     # compute the deviations for each motif
+#     activityScore <- lapply(peakMatchScore, \(score) {
+#         # find which peaks containing that motif
+#         idx <- which(rowSums(score)!=0) 
+#         # compute background deviations
+#         colSum_bg <- sapply(seq_len(ncol(backgroundPeaks)), \(x) {
+#             bg_i <- backgroundPeaks[idx,x]
+#             maxPeak <- maxScorePeaks[bg_i,]
+#             # deviations
+#             sMaxPeak <- colSums(maxScorePeaks[bg_i,])
+#             #(sMaxPeak-mean(sMaxPeak))/mean(sMaxPeak)
+#         })
+#         dev_bg <- (colSum_bg-colMeans(colSum_bg))/colMeans(colSum_bg)
+#         y <- colSums(score[idx,])
+#         dev_motif <- (y-mean(y))/mean(y)
+#         
+#         z <- (dev_motif-rowMeans(dev_bg))/rowSds(dev_bg) 
+#         list(z=z, sumScore_motif=y, dev_bg=dev_bg, sumScore_bg=colSum_bg)
+#     })
+#     return(activityScore)
+# }
 .getMotifActivityScore <- function (backgroundPeaks, 
     peakMatchScore, 
-    maxScorePeaks) {
+    bgScore) {
+    
     # compute the deviations for each motif
-    activityScore <- sapply(peakMatchScore, \(score) {
+    activityScore <- lapply(peakMatchScore, function(score) {
         # find which peaks containing that motif
         idx <- which(rowSums(score)!=0) 
         # compute background deviations
-        dev_bg <- t(sapply(seq_len(ncol(backgroundPeaks)), \(x) {
+        bg_scores <- sapply(seq_len(ncol(backgroundPeaks)), function(x) {
             bg_i <- backgroundPeaks[idx,x]
-            maxPeak <- maxScorePeaks[bg_i,]
+            peak_set <- bgScore[bg_i,]
             # deviations
-            (colSums(maxPeak)-mean(colSums(maxPeak)))/mean(colSums(maxPeak))
-        }))
+            bg_score <- colSums(peak_set)
+        })
         
-        y <- colSums(score[idx,])
-        dev_motif <- y-mean(y)/mean(y)
+        motif_score <- colSums(score[idx,])
+        bg_score <- rowMeans(bg_scores)
+        bg_motif_score <- motif_score - rowMeans(bg_scores)
+        z <- bg_motif_score/rowSds(bg_scores)
         
-        z <- (dev_motif-mean(dev_bg))/sd(dev_bg) #or colMeans and colSds?
+        dev_motif <- (motif_score-mean(motif_score))/mean(motif_score)
+        dev_bg <- (bg_scores-colMeans(bg_scores))/colMeans(bg_scores)
+        dev_z <- (dev_motif - rowMeans(dev_bg))/rowSds(dev_bg)
+        list(motif_score=motif_score,bg_motif_score=bg_motif_score,z=z,
+            dev_motif, dev_bg=dev_bg,dev_z=dev_z, bg_score=bg_score)
 
-        
     })
-    return(t(activityScore))
+    return(activityScore)
 }
 
 
 computeMotifActivityScore <- function (se,
     atacFrag, 
-    peakRange,
+    #peakRange,
     motif,
     species,
     minFrag = 30,
@@ -226,7 +645,12 @@ computeMotifActivityScore <- function (se,
     ...
     ) {
     # standard chromosomes
-    peakRange <- .standardChromosomes(peakRange, species = species)
+    #rowData(se)$peakID <- seq_len(nrow(se))
+    
+    # already resized peaks
+    se <- filterPeaks(se, non_overlapping = TRUE)
+    peakRange <- rowRanges(se)
+
     atacFrag <- lapply(atacFrag, function(dt) {
         gr <- dtToGr(dt)
         gr <- .standardChromosomes(gr, species = species)
@@ -248,24 +672,58 @@ computeMotifActivityScore <- function (se,
         peakRange, 
         genome=genome, 
         out = "positions") 
-    
+    motif_ix <- motif_ix[!vapply(motif_ix, \(.) length(.)==0, logical(1))]
     motifData <- lapply(names(motif_ix), function(x) {
         gr <- motif_ix[[x]]
         mcols(gr)$motif_id <- x
         gr
     })
     motifRanges <- plyranges::bind_ranges(motifData)
+    
+    # calculate activity score
     fragDt <- rbindlist(atacFrag, idcol="sample")
-    matchScore <- .getInsertionProfiles(fragDt,
-        motifRanges=motifRanges)
+    matchScore <- .getInsertionProfiles(fragDt, motifRanges=motifRanges)
     peakMatchScore <- .getPeakMatchScore(matchScore, peakRange)
-    background <- .getBackgroundPeaks(se, matchScore, genome, niterations)
+    backgroundPeaks <- .getBackgroundPeaks(se, genome=genome, 
+        niterations=niterations)
+    mcols(peakRange)$id <- 1
+    bgProfile <- .getInsertionBgProfiles(fragDt, peakRange)
+    bgScore <- as.matrix(sparseMatrix(i=bgProfile$coord_id, 
+        j=as.integer(factor(bgProfile$sample)), x=as.numeric(bgProfile$score),
+        dims=dim(se), dimnames=list(rownames(se),colnames(se))))
+    
+    
+    #peakInserts <- .getInserts(fragDt, peakRange)
+    #bgDt <- subset(peakInserts, type=="within")[,.(sum_inserts=.N), by=.(id,sample)]
+    #bgDt[,norm_inserts:=sum_inserts/sum(sum_inserts)*1e4, by=sample]
+    #bgDt[,score:=norm_inserts/width(peakRange)[1]]
+    #bgScore <- as.matrix(sparseMatrix(i=bgDt$id,j=as.integer(as.factor(bgDt$sample)),
+    #    x=bgDt$score,
+    #    dims=dim(se),dimnames=list(rownames(se),colnames(se))))
+    
+    # deviations, z-score, colSums of motifs and (mean deviations of) backgrounds
     activityScore <- .getMotifActivityScore(
-        background$backgroundPeaks,
+        backgroundPeaks,
         peakMatchScore, 
-        background$maxScorePeaks)
+        bgScore)
+    
+    motif_score <- t(sapply(activityScore, \(x) x$motif_score))
+    bg_score <- t(sapply(activityScore, \(x) x$bg_score))
+    return(list(motif_score=motif_score, bg_score=bg_score))
+    # group_id <- c(0,0,1,1)
+    # lms <- lapply(seq_len(nrow(motif_score)), function(i) {
+    #     lm(motif_score[i,] ~ bg_score[i,] + group_id)
+    # })
+    # names(lms) <- rownames(motif_score)
+    # coef <- sapply(lms, function(x) x$coefficients[3])
+    
 }
+# s <- proc.time()
+# z <- computeMotifActivityScore(se,
+#     atacFrag,
+#     motif,
+#     species="Homo sapiens",
+#     genome=BSgenome.Hsapiens.UCSC.hg38)
+# e <- proc.time()
+# e-s
 
-    
-    
-    
