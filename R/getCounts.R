@@ -227,6 +227,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
                                   aggFun=sum,
                                   #minWidth=30,
                                   #maxWidth=2000,
+                                  nullModel=FALSE,
+                                  returnAll=FALSE,
                                   chunk=TRUE){
   
   # prep motif data
@@ -291,7 +293,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
                                              "motif_match_id")])))
     
     # count insertions around motif
-    ai[,rel_pos:=abs(insert-motif_center)]
+    ai[,rel_pos:=insert-motif_center]
     ai[,type:=fifelse(insert>=start & insert<=end, 1,0)]
     aiMotif <- subset(ai, type==1)
     aiMargin <- subset(ai, type==0)
@@ -315,12 +317,23 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   
   # combine insertion counts across chromosomes
   atacInserts <- rbindlist(atacInserts)
+  if(!nullModel){
   atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample_match)), by=.(motif_id, rel_pos_m, sample)]
   atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(motif_id, rel_pos_m)]
   setorder(atacProfiles, motif_id, rel_pos_m)
-  atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
+  atacProfiles[,w:=smooth(pos_count_global, #/sum(pos_count_global),
                           twiceit=TRUE), by=motif_id]
+  atacProfiles[,w:=w/sum(w), by=motif_id]
   atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos_m, motif_id)]
+  atacProfiles[,motif_name:=motifLevels[motif_id]]}
+  else
+  {
+    # uniform weighting
+    atacProfiles[,motif_name:=motifLevels[motif_id]]
+    atacProfiles <- atacInserts[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
+  }
+  
+  
   atacInserts <- merge(atacInserts, 
                        atacProfiles[,c("rel_pos_m", "motif_id", "w"), with=FALSE], 
                        by.x=c("motif_id", "rel_pos_m"),
@@ -328,6 +341,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
   atacInserts[,pos_count_sample_match_norm:=(pos_count_sample_match_m/sum(pos_count_sample_match_m))*1e4, by=sample]
   atacInserts[,score:=w*pos_count_sample_match_norm]
   
+  if(!returnAll){
   # calculate per sample motif match scores
   matchScores <- atacInserts[,.(score=sum(score)), 
                              by=.(motif_match_id, sample)]
@@ -338,8 +352,12 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
                        matchScores)
   matchScores[,chr:=chrLevels[seqnames]]
   matchScores[,motif_name:=motifLevels[motif_id]]
-  
-  return(matchScores)
+  return(list(ms=matchScores, ap=atacProfiles))
+  }
+  else
+  {
+    return(atacInserts)
+  }
 }
 
 
