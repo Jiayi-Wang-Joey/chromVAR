@@ -311,7 +311,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     aiMargin <- aiMargin[,.(pos_count_sample_match=.N), 
                          by=.(motif_match_id, rel_pos, sample, motif_id)]
     aiMargin[,pos_count_sample_match_m:=pos_count_sample_match]
-    aiMargin[,rel_pos_m:=rel_pos-min(abs(rel_pos))*sign(rel_pos)+1, by=motif_id]
+    aiMargin[,rel_pos_m:=rel_pos-min(abs(rel_pos))*sign(rel_pos)+1*sign(rel_pos), by=motif_id]
     rbind(aiMargin, aiMotif, fill=TRUE)
   }, 
   motifData, 
