@@ -729,7 +729,7 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     method <- match.arg(method, choices = c("loess", "lm", "wlm", "tlm", "wtlm"))
     ref <- which.max(colSums(sqrt(counts)))
     #lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(counts[,ref]+1L))) 
-    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMedians(counts)+1L))) 
+    lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(rowMeans(counts)+1L))) 
     #if (is.null(group_id)) group_id <- rep(LETTERS[1:2],each=ncol(counts)/2)
     #lfc <- sapply(seq_len(ncol(counts)), \(i) {
     #  group <- group_id[i]
@@ -737,7 +737,7 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     #  log2((counts[,i]+1L)/(rowMeans(counts[,group_idx])+1L))
     #})
     #colnames(lfc) <- colnames(counts)
-    avg <- rowMeans(counts)
+    avg <- rowMeans(log2(counts+1L))
     
     if (method == "loess") {
       if(nrow(counts) <= 1e4) {
@@ -821,10 +821,6 @@ moderateBinFrequencies <- function (bins, samples, counts) {
         
         
     }
-    #if (method != "loess") {
-    #  newLFC <- sapply(models, \(model) predict(model, data.frame(avg=avg)))
-    #  res <- 2^(-newLFC)*counts
-    #} 
     newLFC <- sapply(models, \(model) predict(model, data.frame(avg=avg)))
     res <- 2^(-newLFC)*counts
     colnames(res) <- colnames(counts)
