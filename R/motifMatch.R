@@ -130,6 +130,8 @@ suppressPackageStartupMessages({
     {
         # uniform weighting
         atacProfiles <- atacInserts[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
+        # got the error atacInserts does not exist
+        #atacProfiles <- atacProfiles[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
     }
     
@@ -153,21 +155,23 @@ suppressPackageStartupMessages({
         
         ai <- cbind(rbindlist(list(atacStartInserts, atacEndInserts)),
             rbindlist(list(
-                md[subjectHits(startHits), c("motif_center", "start", 
+                md[subjectHits(startHits), c("motif_center", "seqnames", "start", 
                     "end", "motif_id", "motif_match_id")],
-                md[subjectHits(endHits), c("motif_center", "start", "end", "motif_id", 
+                md[subjectHits(endHits), c("motif_center","seqnames", "start", "end", "motif_id", 
                     "motif_match_id")])))
         
         # count insertions around motif
         ai[,rel_pos:=insert-motif_center]
-        ai <- ai[,.(pos_count=.N), by=.(motif_match_id, motif_id, sample, rel_pos)]
+        ai <- ai[,.(pos_count=.N), 
+            by=.(seqnames, start, end, motif_match_id, motif_id, sample, rel_pos)]
         
         ai <- merge(ai, atacProfiles[,c("rel_pos", "motif_id", "w"), with=FALSE], 
             by.x=c("motif_id","rel_pos"), 
             by.y=c("motif_id","rel_pos"), all.x=TRUE)
         ai[,score:=w*pos_count]
         as <- ai[,.(score=sum(score), 
-            tot_count=sum(pos_count)), by=.(motif_id, sample)]
+            tot_count=sum(pos_count)), 
+            by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
         gc()
         # get ai[,rel_pos_m:=fifelse(insert<start, insert-start, 0)]
         #     ai[,rel_pos_m:=fifelse(insert>end, insert-end, rel_pos_m)]
@@ -178,17 +182,19 @@ suppressPackageStartupMessages({
         SIMPLIFY=FALSE)
     
     motifScores <- rbindlist(motifScores)
-    motifScores <- motifScores[,.(score=sum(score),
-        tot_inserts=sum(tot_count)), 
-        by=.(motif_id, sample)]
+    # motifScores <- motifScores[,.(score=sum(score),
+    #     tot_inserts=sum(tot_count)),
+    #     by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
     
     if(libNorm)
     {
-        motifScores[,score:=score/tot_inserts]
+        motifScores[,score:=score/sum(tot_count), by=.(sample)]
     }
-    
+    chrLevels
+    motifScores[,seqnames:=chrLevels[seqnames]]
     #motifScores[,nmotif_name:=motifLevels[motif_id]]
-    return(list(ms=motifScores, ap=atacProfiles))
+    #return(list(ms=motifScores, ap=atacProfiles))
+    return(motifScores)
 }
 
 
@@ -720,7 +726,7 @@ suppressPackageStartupMessages({
         dev_bg <- (bg_scores-colMeans(bg_scores))/colMeans(bg_scores)
         dev_z <- (dev_motif - rowMeans(dev_bg))/rowSds(dev_bg)
         list(motif_score=motif_score,bg_motif_score=bg_motif_score,z=z,
-            dev_motif, dev_bg=dev_bg,dev_z=dev_z, bg_score=bg_score)
+            dev_motif=dev_motif, dev_bg=dev_bg,dev_z=dev_z, bg_score=bg_score)
 
     })
     return(activityScore)
@@ -736,6 +742,9 @@ computeMotifActivityScore <- function (se,
     maxFrag = 3000,
     genome,
     niterations=100,
+    nullModel=FALSE,
+    symmetric=TRUE,
+    libNorm=FALSE,
     ...
     ) {
     # standard chromosomes
@@ -776,9 +785,11 @@ computeMotifActivityScore <- function (se,
     
     # calculate activity score
     fragDt <- rbindlist(atacFrag, idcol="sample")
-    matchScore <- .getInsertionProfiles(fragDt, motifRanges=motifRanges)
-    #matchScore <- insertProfile$matchScore
-    #globalProfile <- insertProfile$atacProfiles
+    matchScore <- .getInsertionProfiles(fragDt, 
+        motifRanges=motifRanges,
+        nullModel=nullModel,
+        symmetric=symmetric,
+        libNorm=libNorm)
     peakMatchScore <- .getPeakMatchScore(matchScore, peakRange)
     backgroundPeaks <- .getBackgroundPeaks(se, genome=genome, 
         niterations=niterations)
