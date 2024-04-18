@@ -221,6 +221,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
 
 
 #' @Author: Emanuel Sonder
+#' @Author: Emanuel Sonder
 .getInsertionProfiles <- function(atacFrag, 
     motifRanges,
     margin=200,
@@ -413,7 +414,6 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     #return(list(ms=motifScores, ap=atacProfiles))
     return(motifScores)
 }
-
 
 
 # Comment: 
