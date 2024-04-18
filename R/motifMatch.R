@@ -416,7 +416,7 @@ suppressPackageStartupMessages({
     return(scores)
 }
 
-<<<<<<< HEAD
+
 
 #' Mapping & aggregating modalities with genomic coordinates to reference 
 #' coordinates.
@@ -589,8 +589,7 @@ suppressPackageStartupMessages({
     return(overlapTable)
 }
 
-=======
->>>>>>> c63064c9798cfe02cc49b90271744dde7d2acdb7
+
 
 
 
