@@ -182,15 +182,16 @@ suppressPackageStartupMessages({
         SIMPLIFY=FALSE)
     
     motifScores <- rbindlist(motifScores)
-    # motifScores <- motifScores[,.(score=sum(score),
-    #     tot_inserts=sum(tot_count)),
-    #     by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
+    motifScores <- motifScores[,.(score=sum(score),
+        tot_inserts=sum(tot_count)),
+        by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
     
     if(libNorm)
     {
-        motifScores[,score:=score/sum(tot_count), by=.(sample)]
+        motifScores[,tot_count:=sum(tot_count), by=.(sample)]
+        motifScores[,score:=score/tot_count]
     }
-    chrLevels
+
     motifScores[,seqnames:=chrLevels[seqnames]]
     #motifScores[,nmotif_name:=motifLevels[motif_id]]
     #return(list(ms=motifScores, ap=atacProfiles))
@@ -314,6 +315,8 @@ suppressPackageStartupMessages({
     coords,
     #minWidth=30,
     #maxWidth=2000,
+    symmetric=TRUE,
+    libNorm=FALSE,
     chunk=TRUE){
     
     # prep motif data
@@ -394,12 +397,19 @@ suppressPackageStartupMessages({
     atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
         twiceit=TRUE), by=id]
     atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos, id)]
+    if(symmetric) atacProfiles[,w:=rev(w)+w, by=id]
+    atacProfiles[,w:=w/sum(w)]
     atacInserts <- merge(atacInserts, 
         atacProfiles[,c("rel_pos", "id", "w"), with=FALSE], 
         by.x=c("id", "rel_pos"),
         by.y=c("id", "rel_pos"))
-    #atacInserts[,pos_count_sample_norm:=(pos_count_sample/sum(pos_count_sample))*1e4, by=sample]
-    atacInserts[,score:=w*pos_count_sample]
+    if (libNorm) {
+        atacInserts[,pos_count_sample_norm:=
+                (pos_count_sample/sum(pos_count_sample)), by=sample]
+        atacInserts[,score:=w*pos_count_sample_norm]
+    } else {
+        atacInserts[,score:=w*pos_count_sample]
+    }
     
     
     # calculate per sample motif match scores
@@ -416,7 +426,7 @@ suppressPackageStartupMessages({
     return(scores)
 }
 
-<<<<<<< HEAD
+
 
 #' Mapping & aggregating modalities with genomic coordinates to reference 
 #' coordinates.
@@ -589,8 +599,6 @@ suppressPackageStartupMessages({
     return(overlapTable)
 }
 
-=======
->>>>>>> c63064c9798cfe02cc49b90271744dde7d2acdb7
 
 
 
@@ -728,8 +736,9 @@ suppressPackageStartupMessages({
         dev_motif <- (motif_score-mean(motif_score))/mean(motif_score)
         dev_bg <- (bg_scores-colMeans(bg_scores))/colMeans(bg_scores)
         dev_z <- (dev_motif - rowMeans(dev_bg))/rowSds(dev_bg)
-        list(motif_score=motif_score,bg_motif_score=bg_motif_score,z=z,
-            dev_motif=dev_motif, dev_bg=dev_bg,dev_z=dev_z, bg_score=bg_score)
+        list(motif_score=motif_score, bg_motif_score=bg_motif_score, z=z,
+            dev_motif=dev_motif, dev_bg=rowMeans(dev_bg), dev_z=dev_z, 
+            bg_score=bg_score)
 
     })
     return(activityScore)
@@ -797,7 +806,8 @@ computeMotifActivityScore <- function (se,
     backgroundPeaks <- .getBackgroundPeaks(se, genome=genome, 
         niterations=niterations)
     mcols(peakRange)$id <- 1
-    bgProfile <- .getInsertionBgProfiles(fragDt, peakRange)
+    bgProfile <- .getInsertionBgProfiles(fragDt, peakRange, 
+        libNorm=libNorm, symmetric=symmetric)
     bgScore <- as.matrix(sparseMatrix(i=bgProfile$coord_id, 
         j=as.integer(factor(bgProfile$sample)), x=as.numeric(bgProfile$score),
         dims=dim(se), dimnames=list(rownames(se),colnames(se))))
@@ -817,9 +827,17 @@ computeMotifActivityScore <- function (se,
         peakMatchScore, 
         bgScore)
     
-    motif_score <- t(sapply(activityScore, \(x) x$motif_score))
-    bg_score <- t(sapply(activityScore, \(x) x$bg_score))
-    return(list(motif_score=motif_score, bg_score=bg_score))
+    .m <- \(name) {
+        res <- t(sapply(activityScore, \(x) x[[name]]))
+        colnames(res) <- colnames(se)
+        res
+        }
+    asy <- list(motif_score=.m("motif_score"), bg_score=.m("bg_score"),
+        bg_motif_score=.m("bg_motif_score"), z=.m("z"),
+        dev_motif=.m("dev_motif"), dev_z=.m("dev_z"), dev_bg=.m("dev_bg"))
+    se <- SummarizedExperiment(assays = asy)
+
+    return(se)
     # group_id <- c(0,0,1,1)
     # lms <- lapply(seq_len(nrow(motif_score)), function(i) {
     #     lm(motif_score[i,] ~ bg_score[i,] + group_id)

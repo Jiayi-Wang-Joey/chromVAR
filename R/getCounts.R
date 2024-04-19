@@ -406,7 +406,8 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     
     if(libNorm)
     {
-        motifScores[,score:=score/sum(tot_count), by=.(sample)]
+        motifScores[,tot_count:=sum(tot_count), by=.(sample)]
+        motifScores[,score:=score/tot_count]
     }
     chrLevels
     motifScores[,seqnames:=chrLevels[seqnames]]
@@ -804,28 +805,22 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     #lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(counts[,ref]+1L))) 
     lfc <- sapply(seq_len(ncol(counts)), \(i) log2((counts[,i]+1L)/(rowMeans(counts[,-i])+1L))) 
     colnames(lfc) <- colnames(counts)
-    #if (is.null(group_id)) group_id <- rep(LETTERS[1:2],each=ncol(counts)/2)
-    #lfc <- sapply(seq_len(ncol(counts)), \(i) {
-    #  group <- group_id[i]
-    #  group_idx <- which(group_id==group)
-    #  log2((counts[,i]+1L)/(rowMeans(counts[,group_idx])+1L))
-    #})
-    #colnames(lfc) <- colnames(counts)
-    avg <- rowMeans(log2(counts+1L))
+    avg <- sapply(seq_len(ncol(counts)), \(i) 0.5*log2((counts[,i]+1L)*(rowMeans(counts[,-i])+1L))) 
+    colnames(avg) <- colnames(lfc) <- colnames(counts)
     
     if (method == "loess") {
       if(nrow(counts) <= 1e4) {
         models <- lapply(colnames(counts), \(x) {
-          df <- data.frame(lfc = lfc[,x], avg=avg)
+          df <- data.frame(lfc = lfc[,x], avg=avg[,x])
           loess(lfc ~ avg, df, span=0.7, degree = 1,
             control=loess.control(surface="direct"))
         })
       } else {
         nBins <- 20
         nSample <- 1e4
-        #logAvg <- log1p(avg)
-        bins <- cut(avg,
-          breaks = seq(min(avg), max(avg), (max(avg)-min(avg))/nBins),
+        allAvg <- log2(rowMeans(counts+1L))
+        bins <- cut(allAvg,
+          breaks = seq(min(allAvg), max(allAvg), (max(allAvg)-min(allAvg))/nBins),
           include.lowest = TRUE)
         idx <- unlist(sapply(seq_len(length(levels(bins))), \(i) {
           ids <- which(bins==levels(bins)[i])
@@ -895,7 +890,8 @@ moderateBinFrequencies <- function (bins, samples, counts) {
         
         
     }
-    newLFC <- sapply(models, \(model) predict(model, data.frame(avg=avg)))
+    newLFC <- sapply(seq_len(length(models)), 
+        \(i) predict(models[[i]], data.frame(avg=avg[,i])))
     res <- (2^(-newLFC/2))*counts
     colnames(res) <- colnames(counts)
     return(res)
