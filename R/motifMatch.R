@@ -391,8 +391,11 @@ suppressPackageStartupMessages({
     atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample)), by=.(id, rel_pos, sample)]
     atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(id, rel_pos)]
     setorder(atacProfiles, id, rel_pos)
-    atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
-        twiceit=TRUE), by=id]
+   # atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
+  #      twiceit=TRUE), by=id]
+    atacProfiles[,w:=smooth(pos_count_global), twiceit=TRUE), by=id]
+    atacProfiles[,w:=w*length(w)/sum(w), by=id]
+    
     atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos, id)]
     atacInserts <- merge(atacInserts, 
         atacProfiles[,c("rel_pos", "id", "w"), with=FALSE], 

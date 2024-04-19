@@ -351,6 +351,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         # uniform weighting
         atacProfiles <- atacProfiles[,.(w=1), by=.(motif_id, rel_pos)]
         atacProfiles[,w:=w/sum(w), by=motif_id]
+        atacProfiles[,w:=length(w)*w/sum(w), by=motif_id]
         # got the error atacInserts does not exist
         #atacProfiles <- atacProfiles[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
