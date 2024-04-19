@@ -340,14 +340,17 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         setorder(atacProfiles, motif_id, rel_pos)
         atacProfiles[,w:=smooth(pos_count_global, twiceit=TRUE), by=motif_id]
         if(symmetric) atacProfiles[,w:=rev(w)+w, by=motif_id]
-        atacProfiles[,w:=w/sum(w), by=motif_id]
+        
+        atacProfiles[,w:=length(w)*w/sum(w), by=motif_id]
+        #atacProfiles[,w:=w/sum(w), by=motif_id]
         
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
     }
     else
     {
         # uniform weighting
-        atacProfiles <- atacInserts[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
+        atacProfiles <- atacProfiles[,.(w=1), by=.(motif_id, rel_pos)]
+        atacProfiles[,w:=w/sum(w), by=motif_id]
         # got the error atacInserts does not exist
         #atacProfiles <- atacProfiles[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
@@ -381,7 +384,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         # count insertions around motif
         ai[,rel_pos:=insert-motif_center]
         ai <- ai[,.(pos_count=.N), 
-            by=.(seqnames, start, end, motif_match_id, motif_id, sample, rel_pos)]
+            by=.(motif_match_id, motif_id, sample, rel_pos)]
         
         ai <- merge(ai, atacProfiles[,c("rel_pos", "motif_id", "w"), with=FALSE], 
             by.x=c("motif_id","rel_pos"), 
@@ -389,7 +392,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         ai[,score:=w*pos_count]
         as <- ai[,.(score=sum(score), 
             tot_count=sum(pos_count)), 
-            by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
+            by=.(motif_match_id, motif_id, sample)]
         gc()
         # get ai[,rel_pos_m:=fifelse(insert<start, insert-start, 0)]
         #     ai[,rel_pos_m:=fifelse(insert>end, insert-end, rel_pos_m)]
@@ -406,13 +409,20 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
     
     if(libNorm)
     {
-        motifScores[,score:=score/sum(tot_count), by=.(sample)]
+        motifScores[,tot_count:=sum(tot_count), by=.(sample)]
+        motifScores[,score:=score/tot_count]
     }
-    chrLevels
-    motifScores[,seqnames:=chrLevels[seqnames]]
+    
+    motifData <- rbindlist(motifData)
+    motifData[,seqnames:=chrLevels[seqnames]]
+    motifScores <- cbind(motifScores, 
+                         motifData[motifScores$motif_match_id,
+                                   c("motif_id", "start", "end", "seqnames"), with=FALSE])
+    #chrLevels
+    #motifScores[,seqnames:=chrLevels[seqnames]]
     #motifScores[,nmotif_name:=motifLevels[motif_id]]
     #return(list(ms=motifScores, ap=atacProfiles))
-    return(motifScores)
+    return(list(motifScores, atacProfiles))
 }
 
 
