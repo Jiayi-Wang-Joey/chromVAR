@@ -3,7 +3,6 @@ suppressPackageStartupMessages({
     library(motifmatchr)
 })
 
-#' @Author: Emanuel Sonder
 .getInsertionProfiles <- function(atacFrag, 
     motifRanges,
     margin=200,
@@ -122,14 +121,18 @@ suppressPackageStartupMessages({
         setorder(atacProfiles, motif_id, rel_pos)
         atacProfiles[,w:=smooth(pos_count_global, twiceit=TRUE), by=motif_id]
         if(symmetric) atacProfiles[,w:=rev(w)+w, by=motif_id]
-        atacProfiles[,w:=w/sum(w), by=motif_id]
+        
+        atacProfiles[,w:=length(w)*w/sum(w), by=motif_id]
+        #atacProfiles[,w:=w/sum(w), by=motif_id]
         
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
     }
     else
     {
         # uniform weighting
-        atacProfiles <- atacInserts[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
+        atacProfiles <- atacProfiles[,.(w=1), by=.(motif_id, rel_pos)]
+        atacProfiles[,w:=w/sum(w), by=motif_id]
+        atacProfiles[,w:=length(w)*w/sum(w), by=motif_id]
         # got the error atacInserts does not exist
         #atacProfiles <- atacProfiles[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
@@ -163,7 +166,7 @@ suppressPackageStartupMessages({
         # count insertions around motif
         ai[,rel_pos:=insert-motif_center]
         ai <- ai[,.(pos_count=.N), 
-            by=.(seqnames, start, end, motif_match_id, motif_id, sample, rel_pos)]
+            by=.(motif_match_id, motif_id, sample, rel_pos)]
         
         ai <- merge(ai, atacProfiles[,c("rel_pos", "motif_id", "w"), with=FALSE], 
             by.x=c("motif_id","rel_pos"), 
@@ -171,7 +174,7 @@ suppressPackageStartupMessages({
         ai[,score:=w*pos_count]
         as <- ai[,.(score=sum(score), 
             tot_count=sum(pos_count)), 
-            by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
+            by=.(motif_match_id, motif_id, sample)]
         gc()
         # get ai[,rel_pos_m:=fifelse(insert<start, insert-start, 0)]
         #     ai[,rel_pos_m:=fifelse(insert>end, insert-end, rel_pos_m)]
@@ -180,21 +183,29 @@ suppressPackageStartupMessages({
         motifData, 
         atacFrag, 
         SIMPLIFY=FALSE)
-    
+    motifScores <- motifScores[!vapply(motifScores, \(.) nrow(.)==0, logical(1))]
     motifScores <- rbindlist(motifScores)
-    motifScores <- motifScores[,.(score=sum(score),
-        tot_inserts=sum(tot_count)),
-        by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
+    # motifScores <- motifScores[,.(score=sum(score),
+    #     tot_inserts=sum(tot_count)),
+    #     by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
     
     if(libNorm)
     {
         motifScores[,tot_count:=sum(tot_count), by=.(sample)]
         motifScores[,score:=score/tot_count]
     }
-
-    motifScores[,seqnames:=chrLevels[seqnames]]
+    
+    motifData <- rbindlist(motifData)
+    motifData[,seqnames:=chrLevels[seqnames]]
+    #motifData[,sample:=as.factor(sample)]
+    motifScores <- cbind(motifScores, 
+        motifData[motifScores$motif_match_id,
+            c("motif_id", "start", "end", "seqnames"), with=FALSE])
+    #chrLevels
+    #motifScores[,seqnames:=chrLevels[seqnames]]
     #motifScores[,nmotif_name:=motifLevels[motif_id]]
     #return(list(ms=motifScores, ap=atacProfiles))
+    #return(list(motifScores, atacProfiles))
     return(motifScores)
 }
 
@@ -394,8 +405,11 @@ suppressPackageStartupMessages({
     atacProfiles <- atacInserts[,.(pos_count_sample=sum(pos_count_sample)), by=.(id, rel_pos, sample)]
     atacProfiles <- atacProfiles[,pos_count_global:=sum(pos_count_sample), by=.(id, rel_pos)]
     setorder(atacProfiles, id, rel_pos)
-    atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
-        twiceit=TRUE), by=id]
+   # atacProfiles[,w:=smooth(pos_count_global/sum(pos_count_global),
+  #      twiceit=TRUE), by=id]
+    atacProfiles[,w:=smooth(pos_count_global, twiceit=TRUE), by=id]
+    atacProfiles[,w:=w*length(w)/sum(w), by=id]
+    
     atacProfiles <- atacProfiles[,.(w=first(w)), by=.(rel_pos, id)]
     if(symmetric) atacProfiles[,w:=rev(w)+w, by=id]
     atacProfiles[,w:=w/sum(w)]
@@ -631,50 +645,12 @@ suppressPackageStartupMessages({
 #' each peak 
 #' @param se a SummarizedExperiment object that containing original fragment count
 #' on peak level
-#' @param matchScore a data table containing motif ranges, motif_id, sample 
-#' and match score (output by `.getInsertProfile`)
 #' @param genome BSgenome object
 #' @param niterations number of background peaks to sample
 #' @return a list containing background peak indices and a matrix containing the 
 #' strongest motif match score for peaks per sample
-# .getBackgroundPeaks <- function (se, 
-#     matchScore, 
-#     genome,
-#     niterations=10) {
-#     se <- addGCBias(se,genome=genome)
-#     bg <- getBackgroundPeaks(object=se, niterations=niterations)
-#     if ("strand" %in% colnames(matchScore)) matchScore$strand <- NULL
-#     maxScoreSample <- .genomicRangesMapping(refRanges=rowRanges(se), 
-#         aggregationFun=max,
-#         assayTable=matchScore, 
-#         byCols=c("sample","motif_id"), 
-#         seqNamesCol="seqnames", 
-#         scoreCol="score")
-#     
-#     maxIds <- lapply(maxScoreSample, \(x) {
-#         dt <- as(x,"TsparseMatrix")
-#         #rownames(dt) <- seq_len(nrow(dt))
-#         idDt <- data.table(peakID=dt@i+1, 
-#             motif_id=colnames(x)[dt@j+1], score=dt@x)
-#     })
-#     maxId <- rbindlist(maxIds, idcol="sample")
-#     maxId[,mean_score:=sum(score)/length(meanScorePeak),by=.(peakID, motif_id)]
-#     maxId[,max_score:=max(mean_score),by=peakID]
-#     maxDt <- maxId[maxId$max_score==maxId$mean_score,]
-#     resDt <- data.table(peakID=seq_len(nrow(se)))
-#     resDt <- merge(resDt, maxDt, by = "peakID", all.x=TRUE)
-#     maxScorePeaks <- data.table::dcast(resDt, peakID~sample, fill=0, 
-#          fun.aggregate = mean, value.var = "score", drop=FALSE)
-#     #rownames(maxScorePeaks) <- maxScorePeaks$peakID
-#     maxScorePeaks$`NA` <- NULL
-#     maxScorePeaks$peakID <- NULL
-#     
-#     
-#     return(list(backgroundPeaks=bg, maxScorePeaks=maxScorePeaks))
-# }
 
-
-.getBackgroundPeaks <- function(se, genome, niterations=100) {
+.getBackgroundPeaks <- function(se, genome, niterations) {
     se <- addGCBias(se,genome=genome)
     bg <- getBackgroundPeaks(object=se, niterations=niterations)
     #bgProfile <- .getInsertionBgProfiles(fragDt, peakRange)
@@ -688,30 +664,6 @@ suppressPackageStartupMessages({
 #' peaks per sample
 #' @return a list of matrix containing motif activity score on peak level per sample
 
-# .getMotifActivityScore <- function (backgroundPeaks, 
-#     peakMatchScore, 
-#     maxScorePeaks) {
-#     # compute the deviations for each motif
-#     activityScore <- lapply(peakMatchScore, \(score) {
-#         # find which peaks containing that motif
-#         idx <- which(rowSums(score)!=0) 
-#         # compute background deviations
-#         colSum_bg <- sapply(seq_len(ncol(backgroundPeaks)), \(x) {
-#             bg_i <- backgroundPeaks[idx,x]
-#             maxPeak <- maxScorePeaks[bg_i,]
-#             # deviations
-#             sMaxPeak <- colSums(maxScorePeaks[bg_i,])
-#             #(sMaxPeak-mean(sMaxPeak))/mean(sMaxPeak)
-#         })
-#         dev_bg <- (colSum_bg-colMeans(colSum_bg))/colMeans(colSum_bg)
-#         y <- colSums(score[idx,])
-#         dev_motif <- (y-mean(y))/mean(y)
-#         
-#         z <- (dev_motif-rowMeans(dev_bg))/rowSds(dev_bg) 
-#         list(z=z, sumScore_motif=y, dev_bg=dev_bg, sumScore_bg=colSum_bg)
-#     })
-#     return(activityScore)
-# }
 .getMotifActivityScore <- function (backgroundPeaks, 
     peakMatchScore, 
     bgScore) {
@@ -736,9 +688,10 @@ suppressPackageStartupMessages({
         dev_motif <- (motif_score-mean(motif_score))/mean(motif_score)
         dev_bg <- (bg_scores-colMeans(bg_scores))/colMeans(bg_scores)
         dev_z <- (dev_motif - rowMeans(dev_bg))/rowSds(dev_bg)
-        list(motif_score=motif_score, bg_motif_score=bg_motif_score, z=z,
-            dev_motif=dev_motif, dev_bg=rowMeans(dev_bg), dev_z=dev_z, 
-            bg_score=bg_score)
+        # list(motif_score=motif_score, bg_motif_score=bg_motif_score, z=z,
+        #     dev_motif=dev_motif, dev_bg=rowMeans(dev_bg), dev_z=dev_z, 
+        #     bg_score=bg_score)
+        list(motif_score=motif_score, bg_scores=bg_scores)
 
     })
     return(activityScore)
@@ -747,8 +700,7 @@ suppressPackageStartupMessages({
 
 computeMotifActivityScore <- function (se,
     atacFrag, 
-    #peakRange,
-    motif,
+    motifRanges,
     species,
     minFrag = 30,
     maxFrag = 3000,
@@ -759,20 +711,16 @@ computeMotifActivityScore <- function (se,
     libNorm=FALSE,
     ...
     ) {
-    # standard chromosomes
-    #rowData(se)$peakID <- seq_len(nrow(se))
-    
+
     # already resized peaks
     se <- filterPeaks(se, non_overlapping = TRUE)
     peakRange <- rowRanges(se)
-
+    motifRanges <- .standardChromosomes(motifRanges, species = species)
     atacFrag <- lapply(atacFrag, function(dt) {
         gr <- dtToGr(dt)
         gr <- .standardChromosomes(gr, species = species)
         as.data.table(gr)
     })
-    
-    
     
     # filter too short or too long fragments
     atacFrag <- .filterFrags(atacFrag, min = minFrag, max = maxFrag)
@@ -782,21 +730,9 @@ computeMotifActivityScore <- function (se,
     atacFrag <- res$atacFrag
     peakRange <- res$ranges
     
-    # get motifRanges
-    motif_ix <- matchMotifs(motif, 
-        peakRange, 
-        genome=genome, 
-        out = "positions") 
-    motif_ix <- motif_ix[!vapply(motif_ix, \(.) length(.)==0, logical(1))]
-    motifData <- lapply(names(motif_ix), function(x) {
-        gr <- motif_ix[[x]]
-        mcols(gr)$motif_id <- x
-        gr
-    })
-    motifRanges <- plyranges::bind_ranges(motifData)
-    
     # calculate activity score
     fragDt <- rbindlist(atacFrag, idcol="sample")
+    rm(atacFrag)
     matchScore <- .getInsertionProfiles(fragDt, 
         motifRanges=motifRanges,
         nullModel=nullModel,
@@ -813,14 +749,6 @@ computeMotifActivityScore <- function (se,
         dims=dim(se), dimnames=list(rownames(se),colnames(se))))
     
     
-    #peakInserts <- .getInserts(fragDt, peakRange)
-    #bgDt <- subset(peakInserts, type=="within")[,.(sum_inserts=.N), by=.(id,sample)]
-    #bgDt[,norm_inserts:=sum_inserts/sum(sum_inserts)*1e4, by=sample]
-    #bgDt[,score:=norm_inserts/width(peakRange)[1]]
-    #bgScore <- as.matrix(sparseMatrix(i=bgDt$id,j=as.integer(as.factor(bgDt$sample)),
-    #    x=bgDt$score,
-    #    dims=dim(se),dimnames=list(rownames(se),colnames(se))))
-    
     # deviations, z-score, colSums of motifs and (mean deviations of) backgrounds
     activityScore <- .getMotifActivityScore(
         backgroundPeaks,
@@ -831,27 +759,18 @@ computeMotifActivityScore <- function (se,
         res <- t(sapply(activityScore, \(x) x[[name]]))
         colnames(res) <- colnames(se)
         res
-        }
-    asy <- list(motif_score=.m("motif_score"), bg_score=.m("bg_score"),
-        bg_motif_score=.m("bg_motif_score"), z=.m("z"),
-        dev_motif=.m("dev_motif"), dev_z=.m("dev_z"), dev_bg=.m("dev_bg"))
-    se <- SummarizedExperiment(assays = asy)
+    }
+    dt <- matchScore[,.(score=sum(score)), by=.(motif_id,sample)]
+    ms <- reshape2::acast(dt, motif_id ~ sample, value.var = "score")
+    
+    # asy <- list(max_motif_score=.m("motif_score"), bg_score=.m("bg_score"),
+    #     bg_motif_score=.m("bg_motif_score"), z=.m("z"),
+    #     dev_motif=.m("dev_motif"), dev_z=.m("dev_z"), dev_bg=.m("dev_bg"),
+    #     sum_motif_score=ms)
+    # se <- SummarizedExperiment(assays = asy)
 
-    return(se)
-    # group_id <- c(0,0,1,1)
-    # lms <- lapply(seq_len(nrow(motif_score)), function(i) {
-    #     lm(motif_score[i,] ~ bg_score[i,] + group_id)
-    # })
-    # names(lms) <- rownames(motif_score)
-    # coef <- sapply(lms, function(x) x$coefficients[3])
+    return(list(activityScore=activityScore, sum_motif_score=ms))
     
 }
-# s <- proc.time()
-# z <- computeMotifActivityScore(se,
-#     atacFrag,
-#     motif,
-#     species="Homo sapiens",
-#     genome=BSgenome.Hsapiens.UCSC.hg38)
-# e <- proc.time()
-# e-s
+
 

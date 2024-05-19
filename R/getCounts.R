@@ -340,14 +340,18 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         setorder(atacProfiles, motif_id, rel_pos)
         atacProfiles[,w:=smooth(pos_count_global, twiceit=TRUE), by=motif_id]
         if(symmetric) atacProfiles[,w:=rev(w)+w, by=motif_id]
-        atacProfiles[,w:=w/sum(w), by=motif_id]
+        
+        atacProfiles[,w:=length(w)*w/sum(w), by=motif_id]
+        #atacProfiles[,w:=w/sum(w), by=motif_id]
         
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
     }
     else
     {
         # uniform weighting
-        atacProfiles <- atacInserts[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
+        atacProfiles <- atacProfiles[,.(w=1), by=.(motif_id, rel_pos)]
+        atacProfiles[,w:=w/sum(w), by=motif_id]
+        atacProfiles[,w:=length(w)*w/sum(w), by=motif_id]
         # got the error atacInserts does not exist
         #atacProfiles <- atacProfiles[,.(w=1/.N), by=.(motif_id, rel_pos_m)]
         #atacProfiles[,motif_name:=motifLevels[motif_id]]
@@ -381,7 +385,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         # count insertions around motif
         ai[,rel_pos:=insert-motif_center]
         ai <- ai[,.(pos_count=.N), 
-            by=.(seqnames, start, end, motif_match_id, motif_id, sample, rel_pos)]
+            by=.(motif_match_id, motif_id, sample, rel_pos)]
         
         ai <- merge(ai, atacProfiles[,c("rel_pos", "motif_id", "w"), with=FALSE], 
             by.x=c("motif_id","rel_pos"), 
@@ -389,7 +393,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         ai[,score:=w*pos_count]
         as <- ai[,.(score=sum(score), 
             tot_count=sum(pos_count)), 
-            by=.(seqnames, start, end, motif_match_id, motif_id, sample)]
+            by=.(motif_match_id, motif_id, sample)]
         gc()
         # get ai[,rel_pos_m:=fifelse(insert<start, insert-start, 0)]
         #     ai[,rel_pos_m:=fifelse(insert>end, insert-end, rel_pos_m)]
@@ -409,10 +413,17 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
         motifScores[,tot_count:=sum(tot_count), by=.(sample)]
         motifScores[,score:=score/tot_count]
     }
-    chrLevels
+    
+    motifData <- rbindlist(motifData)
+    motifData[,seqnames:=chrLevels[seqnames]]
+    motifScores <- cbind(motifScores, 
+                         motifData[motifScores$motif_match_id,
+                                   c("start", "end", "seqnames"), with=FALSE])
+    #chrLevels
     motifScores[,seqnames:=chrLevels[seqnames]]
     #motifScores[,nmotif_name:=motifLevels[motif_id]]
     #return(list(ms=motifScores, ap=atacProfiles))
+    #return(list(motifScores, atacProfiles))
     return(motifScores)
 }
 
@@ -612,8 +623,10 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
       overlaps <- cbind(frag[queryHits(hits),],
                peaks[subjectHits(hits), c("peakID")])
       tmp <- overlaps[, c(list(counts = sum(count, na.rm = TRUE)), 
-        lapply(.SD, sum, na.rm = TRUE)), 
-        by = peakID, .SDcols = c(types)]
+          list(mean_width = mean(width, na.rm = TRUE)),
+          list(median_width = median(width, na.rm = TRUE)),
+          lapply(.SD, sum, na.rm = TRUE)), 
+          by = peakID, .SDcols = c(types)]
       
       res <- data.table(peakID = seq_len(nrow(peaks)))
       res <- merge(res, tmp, all =TRUE)
@@ -622,7 +635,7 @@ dtToGr <- function(dt, seqCol="seqnames", startCol="start", endCol="end"){
       
     })
     
-    cols <- names(fragCounts[[1]])[grepl("^type_|counts", 
+    cols <- names(fragCounts[[1]])[grepl("^type_|counts|_width", 
       names(fragCounts[[1]]))]
     allCounts <- lapply(cols, function(x) {
       lst <- lapply(fragCounts, function(.) data.frame(.)[,x])
@@ -749,12 +762,6 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     if (moderating) {
       dt <- unique(fragDt, by=c("bin","sample"))
       dt <- dt[, c("sample", "count_bin", "bin"), with = FALSE]
-      #dts <- lapply(split(dt,dt$motif), \(x) {
-      #    x$freq_bin <- moderateBinFrequencies(x$bin, 
-      #        x$sample, x$count_bin)
-      #    x
-      #})
-      # dt <- rbindlist(dts)
       dt$freq_bin <- moderateBinFrequencies(dt$bin, dt$sample, dt$count_bin)
       fragDt <- merge(fragDt, dt, by = c("bin","sample"))
     } else {
@@ -767,8 +774,9 @@ moderateBinFrequencies <- function (bins, samples, counts) {
     if (smooth=="none") {
       return(split(fragDt, fragDt$sample))
     } else if (smooth=="smooth.2d") {
-      #fragDt$GCBin <- factor(fragDt$GCBin)
-      dts <- lapply(split(fragDt, fragDt$sample), function(dt) {
+      fb <- fragDt[,c("sample","GCBin","widthBin","weight")]
+      fb <- fb[!duplicated(fb),]
+      dts <- lapply(split(fb, fb$sample), function(dt) {
         dt[,logWeight:=log2(weight)]
         sm <- smooth.2d(dt$logWeight, x=cbind(dt$widthBin, dt$GCBin), 
           surface=FALSE, 
@@ -795,28 +803,21 @@ moderateBinFrequencies <- function (bins, samples, counts) {
 
 #loess, lm, weighted lm, trimmed lm, and weighted trimmed lm
 .weightPeaks <- function(counts, 
-    method = c("loess", "lm", "wlm", "tlm", "wtlm"),
-    group_id = NULL,
-    trimM = 0.15,
-    trimA = 0.05,
+    method,
+    #group_id = NULL,
+    #trimM = 0.15,
+    #trimA = 0.05,
     ...) {
-    method <- match.arg(method, choices = c("loess", "lm", "wlm", "tlm", "wtlm"))
-    #ref <- which.max(colSums(sqrt(counts)))
-    #lfc <- sapply(colnames(counts), \(i) log2((counts[,i]+1L)/(counts[,ref]+1L))) 
-    lfc <- sapply(seq_len(ncol(counts)), \(i) log2((counts[,i]+1L)/(rowMeans(counts[,-i])+1L))) 
-    colnames(lfc) <- colnames(counts)
-    avg <- sapply(seq_len(ncol(counts)), \(i) 0.5*log2((counts[,i]+1L)*(rowMeans(counts[,-i])+1L))) 
-    colnames(avg) <- colnames(lfc) <- colnames(counts)
+    # lfc <- sapply(seq_len(ncol(counts)), \(i) log2((counts[,i]+1L)/(rowMeans(counts+1L)))) 
+    # colnames(lfc) <- colnames(counts)
+    # avg <- rowMeans(log2(counts+1L))
     
     if (method == "loess") {
       if(nrow(counts) <= 1e4) {
-        models <- lapply(colnames(counts), \(x) {
-          df <- data.frame(lfc = lfc[,x], avg=avg[,x])
-          loess(lfc ~ avg, df, span=0.7, degree = 1,
-            control=loess.control(surface="direct"))
-        })
+          res <- affy::normalize.loess(counts+1L, span=0.3, 
+              subset=1:nrow(counts), family.loess="symmetric")
       } else {
-        nBins <- 20
+        nBins <- 100
         nSample <- 1e4
         allAvg <- log2(rowMeans(counts+1L))
         bins <- cut(allAvg,
@@ -831,14 +832,8 @@ moderateBinFrequencies <- function (bins, samples, counts) {
             ids
           else NULL
         }))
-        subcounts <- counts[idx,]
-        sublfc <- lfc[idx,]
-        subavg <- avg[idx]
-        models <-  lapply(colnames(counts), \(x) {
-          df <- data.frame(lfc = sublfc[,x], avg=subavg)
-          loess(lfc ~ avg, df, span=0.7, degree=1,
-            control=loess.control(surface="direct"))
-        })
+        res <- affy::loess.normalize(counts+1L, span=0.3, 
+            subset=idx, family.loess="symmetric")
       }
     } else if (method == "lm") {
         nBins <- 20
@@ -869,7 +864,7 @@ moderateBinFrequencies <- function (bins, samples, counts) {
           df <- data.frame(lfc = lfc[,x], avg=avg)
           model <- lm(lfc ~ avg, df, weights=w)
         })
-    } else {
+    } else if (method=="wtlm") {
       models <- lapply(colnames(counts), \(x){
         df <- data.frame(lfc = lfc[,x], avg=avg)
         lqm <- quantile(df$lfc, trimM, na.rm = TRUE)
@@ -890,12 +885,15 @@ moderateBinFrequencies <- function (bins, samples, counts) {
         
         
     }
-    newLFC <- sapply(seq_len(length(models)), 
-        \(i) predict(models[[i]], data.frame(avg=avg[,i])))
-    res <- (2^(-newLFC/2))*counts
-    colnames(res) <- colnames(counts)
-    return(res)
-
+    
+    if (method!="loess") {
+        newLFC <- sapply(seq_len(length(models)), 
+            \(i) predict(models[[i]], data.frame(avg=avg)))
+        res <- (2^(-newLFC))*counts
+        colnames(res) <- colnames(counts)
+    } else {
+        return(res)
+    }
 }
 
 
